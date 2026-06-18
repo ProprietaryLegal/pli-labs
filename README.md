@@ -21,6 +21,8 @@ Start here:
   finetunes after pruning.
 - [tools/README.md](tools/README.md) - public tooling principles for legal AI
   pipelines.
+- [research/v100/README.md](research/v100/README.md) - V100 inference research,
+  benchmark summaries, and public testing standards.
 
 ## Repository Boundaries
 
