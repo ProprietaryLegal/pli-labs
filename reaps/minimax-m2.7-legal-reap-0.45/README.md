@@ -2,10 +2,12 @@
 
 Status: benchmark-backed candidate.
 
+Formal candidate model card: [MODEL_CARD.md](MODEL_CARD.md).
+
 This page explains the MiniMax-M2.7 0.45 legal REAP as an aggressive
 legal-domain pruning candidate. Current Opus-parity bench testing indicates the
-0.45 prune is performing well. Sanitized benchmark summaries should be added
-before this page is treated as a formal model card.
+0.45 prune is performing well. See the model card for intended use,
+out-of-scope use, validation status, limitations, and privacy boundaries.
 
 ## Why It Was Built
 
