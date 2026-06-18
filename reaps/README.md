@@ -25,13 +25,17 @@ The intended benefits are:
 ## Current Public Case Studies
 
 - [MiniMax-M2.7 legal REAP 0.35](minimax-m2.7-legal-reap-0.35/README.md)
+  ([model card](minimax-m2.7-legal-reap-0.35/MODEL_CARD.md))
 - [MiniMax-M2.7 legal REAP 0.45](minimax-m2.7-legal-reap-0.45/README.md)
+  ([model card](minimax-m2.7-legal-reap-0.45/MODEL_CARD.md))
 - [MiniMax-M2.7 campaign narrative](../wiki/minimax-m2.7-legal-reap-campaign.md)
 
 These MiniMax pages are research case studies. They explain the principles and
 the run history. Current Opus-parity bench testing indicates both prunes are
 performing well, so they are framed as benchmark-backed candidates while
-sanitized score summaries are pending.
+sanitized score summaries are pending. The linked model cards formalize the
+candidate status, intended use, limitations, and privacy boundary without
+inventing public benchmark numbers.
 
 ## Legal REAP Checklist
 
