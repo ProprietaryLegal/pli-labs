@@ -3,16 +3,16 @@
 ## Local Evidence Classes
 
 The public B70 package is summarized from sanitized local evidence generated
-during the June 2026 B70 bring-up and benchmark window:
+during B70-class bring-up and benchmark work:
 
-- B70 hardware inventory and official-spec summaries.
-- Offline stack staging notes for kernel, driver, xpu-smi, container, and
-  model-format readiness.
-- llama.cpp SYCL four-card serve findings.
-- Intel vLLM / llm-scaler XPU canary findings.
-- OpenVINO GenAI HETERO benchmark findings.
-- Long-context legal prompt benchmark artifacts.
-- Service-window restore and readiness notes.
+- official-spec summaries;
+- offline stack staging notes for kernel, driver, telemetry, container, and
+  model-format readiness;
+- GGUF-compatible SYCL serve findings;
+- Intel vLLM / llm-scaler XPU canary findings;
+- OpenVINO GenAI HETERO findings;
+- legal-context benchmark artifacts;
+- restore and readiness notes.
 
 The raw local materials are not published because they include operational
 details that do not belong in a public repository.
@@ -38,5 +38,5 @@ details that do not belong in a public repository.
 ## Public-Release Rule
 
 Public source links are safe to publish. Raw local paths, hostnames, private
-endpoint URLs, model-cache paths, logs, environment files, credentials, and
+service URLs, model-cache paths, logs, environment files, credentials, and
 client-related materials are not.

@@ -1,61 +1,35 @@
-# llama.cpp SYCL Four-Card Success
+# GGUF SYCL Serving Success
 
 ## Result
 
-The B70 research achieved the base goal: a single 122B-class Qwen3.5 MoE GGUF
-served across all four Intel Arc Pro B70 cards through llama.cpp SYCL
-layer-split.
+The B70-class research achieved the base goal: a large MoE GGUF served through
+a SYCL layer-split lane and produced usable long-context legal completions.
 
-The measured model footprint was about 72 GB of GPU memory distributed across
-the four 32 GB cards. That is the key capacity result: the model was not merely
-loaded on CPU or on one card; it used the B70 island as a four-card serving
-target.
+The public result is a capacity and reliability finding. It shows that
+B70-class owned hardware can support a serious local legal AI lane when the
+runtime, model format, and workload are validated together.
 
-## Baseline Smoke
+## What Is Public
 
-The initial four-card success produced coherent output and showed:
+- The successful lane used a GGUF-compatible serving stack.
+- The workload included legal drafting and review prompts.
+- The result passed readiness and completion checks.
+- The lane is useful for private local evaluation.
 
-- about 20 tok/s cold single-stream generation;
-- about 38 tok/s warm single-stream generation;
-- no host wedge or reboot;
-- stable model-serving behavior through the OpenAI-compatible API shape.
+## What Is Private
 
-## Promoted Legal Profile
-
-Later legal-context testing promoted a larger batch/microbatch profile:
-
-| Setting | Public value |
-|---|---:|
-| Context for always-on profile | 12,288 |
-| Batch | 16,384 |
-| Microbatch | 16,384 |
-| Parallel requests | 1 |
-| KV cache | f16 |
-| Split mode | layer |
-| Continuous batching | enabled |
-
-The promotion decision came from legal-context prompts rather than toy prompts.
-The same profile held at L0, L1, and L2 prompt sizes in the benchmark summary.
-
-## Why It Worked
-
-The reliable lane avoids collective libraries and tensor-parallel worker
-barriers. That matters on B70 because the unstable research path involved
-collective-heavy tensor-parallel serving. llama.cpp layer-split uses a simpler
-sequential layer distribution, which made the 122B-class model serveable and
-operationally safe.
+Service ports, model cache paths, internal profile names, failed settings, and
+failure runbooks remain internal. Curated successful launch settings and
+measured throughput are published separately in
+[successful-launch-profile.md](successful-launch-profile.md).
 
 ## Limitation
 
-This is not the final speed story. Layer-split does not create true tensor
-parallelism. It is a proven capacity and reliability result that gives PLI a
-large local legal lane while the tensor-parallel XPU path matures.
+Layer-split serving is a reliability and capacity path. It is not the same
+claim as a tensor-parallel speed record. XPU tensor-parallel work remains a
+separate research lane that requires its own stability gates.
 
 ## Public Release Conclusion
 
-The public headline should be precise:
-
-Four Arc Pro B70 cards can run a 122B-class local legal AI model through
-llama.cpp SYCL layer-split, with long-context benchmark proof. The result is
-production-useful, but it is not the same claim as a four-card tensor-parallel
-speed win.
+B70-class local hardware can be a practical legal AI lane when evaluated on
+real legal workloads and reported with a clear privacy boundary.

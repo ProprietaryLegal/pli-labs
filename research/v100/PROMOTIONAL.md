@@ -2,40 +2,37 @@
 
 ## Short Positioning
 
-PLI Labs is publishing practical V100 research for local AI: what still
-works on Volta, what fails, and how to benchmark old enterprise GPUs without
-pretending they are H100s.
+PLI Labs publishes practical owned-hardware research for local legal AI. The
+V100 work shows how to evaluate older enterprise GPUs without pretending that
+model-load success is production readiness.
 
 ## Longer Positioning
 
-Many firms can buy or repurpose older GPU hardware long before they can justify
-premium cloud inference or new data-center GPUs. V100s are not modern, but they
-are still useful when the model stack respects their limits. This research shows
-how to think about V100 serving honestly: float16-first, topology-aware, careful
-about quantization kernels, skeptical of unmeasured speedups, and disciplined
-about public benchmark evidence.
+Many legal teams can repurpose owned hardware before they can justify premium
+cloud inference or new data-center accelerators. V100-class systems are not
+modern, but they remain useful when the model stack respects their limits.
+
+PLI Labs summarizes public lessons by hardware class, backend family, model
+class, context tier, and rounded performance band. Private topology, recovery
+steps, launch details, and raw failure logs stay internal.
 
 ## Public Claims
 
-- V100 can still run useful local AI workloads.
-- The main problem is not raw VRAM; it is choosing a backend that actually
-  supports sm_70.
-- Medium MoE models can be very fast on V100.
-- Large 100B-class lanes are practical when fit, KV cache, and backend support
-  are verified.
+- V100-class hardware can still run useful local AI workloads.
+- Backend validation matters more than headline VRAM.
 - Loading a huge model is not proof that inference works.
-- Public numbers should distinguish measured V100 results from extrapolated
-  claims.
+- Public numbers should separate measured results from inferred or planned
+  experiments.
+- Legal workloads need validation on realistic long-form prompts, not only
+  toy completions.
 
 ## Suggested Post Copy
 
-PLI Labs published its V100 research notes: benchmark summaries, backend
-findings, topology rules, and a public testing standard for old enterprise GPUs.
-The short version: V100 is not dead, but it punishes lazy assumptions. Use
-float16, verify the quantization kernel, keep tensor parallelism inside fast
-links, and publish failures as well as wins.
+PLI Labs published public-safe V100 research notes for owned-hardware legal AI.
+The short version: older enterprise GPUs are still useful, but only when the
+backend, quantization path, context tier, and workload are tested together.
 
 ## Links
 
-- https://proprietarylegal.ai
 - https://proprietarylegal.com
+- https://proprietarylegal.ai

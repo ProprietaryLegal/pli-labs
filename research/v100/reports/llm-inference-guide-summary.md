@@ -1,55 +1,43 @@
 # LLM Inference On V100 - Public Guide Summary
 
-This page summarizes a 15-page V100 inference guide prepared for a 9-GPU V100
-cluster.
-
 ## Main Point
 
-V100 inference is still practical, but only when the backend is selected around
-Volta. The guide identified three generally viable classes: GGUF through
-`llama.cpp`-style backends, Ollama for quick management, and carefully
-configured vLLM for API serving.
+V100-class inference is still practical, but only when the backend is selected
+around Volta-era limits. The public guide identifies three generally viable
+classes: GGUF-compatible backends, quick local model-management backends, and
+API-serving backends that have been validated on the target model family.
 
 ## Hardware Constraints
 
-- Use float16 paths. V100 does not support bf16 tensor-core inference.
-- Do not assume FlashAttention-2.
-- Do not assume native FP8 compute.
-- Do not assume Marlin or modern AWQ/GPTQ fast paths.
-- Use topology-aware GPU placement because NVLink islands are uneven.
-
-## Backend Guidance
-
-- GGUF backends are the broadest compatibility lane.
-- vLLM can be useful for multi-user API serving, but V100 support is fragile and
-  flag-sensitive.
-- Ollama is useful for quick local testing and model management.
-- Modern stacks that assume newer GPU features should be treated skeptically
-  until tested on V100.
+- Prefer mature float16 paths.
+- Do not assume newer attention or quantization kernels are available.
+- Treat modern stacks skeptically until tested on V100-class hardware.
+- Report public results by broad hardware class and context tier.
 
 ## Benchmark Guidance
 
-The guide recommends capturing:
+Public benchmark summaries should capture:
 
-- topology and NVLink status;
-- backend and model identity;
-- prompt-processing tokens per second;
-- generation tokens per second;
-- time to first token;
-- peak VRAM per GPU;
-- GPU utilization and temperature;
-- failure logs for skipped or crashed models.
+- backend family;
+- model family;
+- context tier;
+- prompt and generation throughput bands;
+- load/readiness status;
+- measured versus inferred status.
+
+Detailed telemetry, private topology, service inventories, temperature logs,
+and failure logs remain internal.
 
 ## Deployment Guidance
 
 The practical deployment model is a layered stack:
 
-- one lane for flexible GGUF serving;
-- one lane for OpenAI-compatible API serving;
-- one orchestration layer for swapping models across GPU groups;
-- one monitoring path for GPU state and service health.
+- one lane for flexible GGUF-compatible serving;
+- one lane for OpenAI-compatible API serving where validated;
+- one orchestration layer for swapping models across owned hardware;
+- one monitoring path for service health.
 
 ## Links
 
-- https://proprietarylegal.ai
 - https://proprietarylegal.com
+- https://proprietarylegal.ai
