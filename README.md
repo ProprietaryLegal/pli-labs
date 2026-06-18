@@ -1,12 +1,26 @@
 # pli-labs
 
-Public Legal AI Projects
+Public legal AI projects from Proprietary Legal Intelligence.
 
-PLI Labs is the public lab repository for Proprietary Legal Intelligence.
+PLI Labs publishes legal-specific model work and legal AI tooling for lawyers
+who want systems they can inspect, run locally, and evaluate against real legal
+workflows.
 
-This repo is intended for public-facing legal AI research notes, release
-planning, evaluation materials, tooling prototypes, and open-source artifacts
-that belong under the Proprietary Legal Intelligence umbrella.
+The core idea is simple: most open model compression and pruning work is aimed
+at coding. Legal drafting, long-form analysis, source-grounded summarization,
+and judgment-heavy document work activate different capabilities. A legal model
+release should explain what legal workload shaped it, what was intentionally
+preserved, what was allowed to degrade, and what evidence supports the result.
+
+Start here:
+
+- [wiki/README.md](wiki/README.md) - public PLI Labs wiki and release thesis.
+- [reaps/README.md](reaps/README.md) - what a legal REAP is and why it differs
+  from coding-oriented REAPs.
+- [finetunes/README.md](finetunes/README.md) - how PLI thinks about legal
+  finetunes after pruning.
+- [tools/README.md](tools/README.md) - public tooling principles for legal AI
+  pipelines.
 
 ## Repository Boundaries
 
@@ -18,4 +32,12 @@ that belong under the Proprietary Legal Intelligence umbrella.
 
 ## Current Status
 
-Initial public scaffold.
+Initial public documentation scaffold. The MiniMax-M2.7 0.35 and 0.45 legal
+REAP materials are published as benchmark-backed candidate notes. Current
+Opus-parity bench testing indicates both prunes are performing well; sanitized
+score summaries should be added before any formal model-card release.
+
+## Links
+
+- Website: https://proprietarylegal.ai
+- Alternate domain: https://proprietarylegal.com
