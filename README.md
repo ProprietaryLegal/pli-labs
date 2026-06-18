@@ -1,26 +1,21 @@
 # pli-labs
 
-PLI Labs is the standalone repository for Proprietary Legal Intelligence lab work.
+Public Legal AI Projects
 
-This repo is separate from NDM/family-court automation repos and from the public
-PLI marketing website. It should be used for PLI Labs research, release
-planning, tooling, model/eval notes, and open-source artifacts that belong under
-the Proprietary Legal Intelligence umbrella.
+PLI Labs is the public lab repository for Proprietary Legal Intelligence.
+
+This repo is intended for public-facing legal AI research notes, release
+planning, evaluation materials, tooling prototypes, and open-source artifacts
+that belong under the Proprietary Legal Intelligence umbrella.
 
 ## Repository Boundaries
 
-- PLI work is a distinct workstream from family-ant, defense-ant, and NDM law
-  practice operations.
-- Do not assume this repo uses the same GitHub account, organization, or remote
-  as the user's other legal repos.
-- Leave the Git remote unset until the intended PLI GitHub account or
-  organization is confirmed.
-- Keep private client files and privileged law-practice work product out of this
-  repo unless the user gives a specific local-only instruction.
+- PLI Labs is distinct from private law-practice automation and client work.
+- Public-release work should be separable from private client materials,
+  attorney-client communications, and privileged work product.
+- Do not add private client files, closed-client materials, credentials, tokens,
+  or machine-local secrets to this repo.
 
-## Related Local Paths
+## Current Status
 
-- `/mnt/hdd/Dropbox/!PLI LLC` - PLI source materials, wiki, launch assets, and
-  marketing content.
-- `/mnt/nvme2/repos/pli-website` - static PLI marketing website.
-- `/mnt/hdd/pli-scan-intake` - existing PLI Labs scanner-intake pipeline.
+Initial public scaffold.

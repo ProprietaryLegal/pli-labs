@@ -8,15 +8,15 @@ This repo is for Proprietary Legal Intelligence / PLI Labs work.
   automation, NDM law-practice operations, and other Mermiges legal repos.
 - Use this repo for PLI Labs research, open-source artifact planning, model
   release materials, eval notes, tooling prototypes, and related lab work.
-- For PLI source materials and business knowledge, consult
-  `/mnt/hdd/Dropbox/!PLI LLC` first.
+- Keep public-release materials cleanly separated from private source materials
+  and business knowledge stored outside this repository.
 
 ## GitHub Identity
 
 - Do not assume this repo uses the same GitHub account, organization, SSH key, or
   remote as the user's other repos.
-- Do not add a Git remote or publish this repo until the intended PLI GitHub
-  identity is confirmed.
+- Use the PLI GitHub identity for this repo. Do not switch it to the user's
+  other GitHub remotes or SSH identities without explicit instruction.
 
 ## Data Boundaries
 
