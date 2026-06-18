@@ -4,6 +4,11 @@ Status: benchmark-backed candidate.
 
 Formal candidate model card: [MODEL_CARD.md](MODEL_CARD.md).
 
+Hugging Face checkpoint:
+[ProprietaryLegal/minimax-m2.7-legal-reap-0.35](https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.35).
+GGUF release:
+[ProprietaryLegal/minimax-m2.7-legal-reap-0.35-gguf](https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.35-gguf).
+
 This page explains the MiniMax-M2.7 0.35 legal REAP as a legal-domain pruning
 candidate. Current Opus-parity bench testing indicates the 0.35 prune is
 performing well. See the model card for intended use, out-of-scope use,
@@ -60,6 +65,12 @@ artifact stronger than a mere engineering demo, while still leaving one public
 documentation task: publish a sanitized score summary that does not expose
 private task names, matter details, or source examples.
 
+## Release Locations
+
+- Hugging Face checkpoint: https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.35
+- Hugging Face GGUF: https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.35-gguf
+- GitHub model card: MODEL_CARD.md
+
 ## Recommended Follow-Up
 
 Add a public benchmark table with aggregate Opus-parity results, task-family
@@ -68,5 +79,5 @@ score review, promote this page from candidate notes to a release-card format.
 
 ## Links
 
-- PLI Labs website: https://proprietarylegal.ai
-- Alternate domain: https://proprietarylegal.com
+- PLI Labs website: https://proprietarylegal.com
+- Research site: https://proprietarylegal.ai

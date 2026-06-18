@@ -27,7 +27,7 @@ validated release card.
 | Prune ratio | 0.45 |
 | Expert cut | Approximately 115 experts pruned per prunable layer |
 | Remaining experts | Approximately 141 experts per prunable layer |
-| Public weights | Not distributed from this repository as of this card |
+| Public weights | Distributed through Hugging Face |
 | Public docs | `README.md`, this model card, and the MiniMax-M2.7 campaign narrative |
 | Contact | nick@proprietarylegal.com |
 
@@ -108,28 +108,25 @@ The next public validation update should include:
 
 ## Hardware and Serving Notes
 
-The candidate was designed with V100-class compatibility in mind by using bf16
-after FP8-to-bf16 pre-dequantization. This does not mean every V100 serving
-backend will run the candidate efficiently. V100-class deployment should be
-tested on the exact backend, quantization path, context length, and GPU topology
-intended for production use.
+The candidate was designed for local owned-hardware evaluation. Deployment
+should be validated on the intended runtime, quantization path, context tier,
+and legal workflow before any production use.
 
 Because 0.45 is the more aggressive candidate, serving gains should be evaluated
 beside legal quality results. Smaller is useful only if the legal capability
 survives.
 
-PLI Labs' public local-serving research is relevant background:
+PLI Labs' public owned-hardware research is relevant background. The public
+research pages summarize broad serving lessons without exposing private launch
+recipes, internal topology, hostnames, ports, or local file paths:
 
 - `../../research/v100/README.md`
-- `../../research/v100/findings/current-stack.md`
-- `../../research/v100/findings/software-stack.md`
-- `../../research/v100/testing/benchmark-summary.md`
 - `../../research/b70/README.md`
 
 ## Limitations
 
 - Public aggregate benchmark numbers are not yet attached to this card.
-- Public weights are not distributed from this repository as of this card.
+- Public weights are distributed through Hugging Face, not committed to GitHub.
 - Private calibration sources and internal legal eval examples are not public.
 - The card records a candidate, not a production-ready legal advice system.
 - Aggressive pruning can preserve fluency while damaging source fidelity or
@@ -175,6 +172,8 @@ This public card intentionally excludes:
 | Related README | `README.md` |
 | Campaign narrative | `../../wiki/minimax-m2.7-legal-reap-campaign.md` |
 | Release principles | `../../wiki/release-principles.md` |
+| Hugging Face checkpoint | `https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.45` |
+| Hugging Face GGUF | `https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.45-gguf` |
 
 ## Citation
 
@@ -188,3 +187,5 @@ If discussing this candidate, cite it as:
 - https://proprietarylegal.com
 - https://proprietarylegal.ai
 - https://github.com/ProprietaryLegal/pli-labs
+- https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.45
+- https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.45-gguf

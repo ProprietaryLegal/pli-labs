@@ -1,48 +1,47 @@
 # Current V100 Stack Findings
 
-## Hardware Shape
+## Hardware Class
 
-The research covers V100-class systems observed in two states:
+The public research covers multi-GPU V100-class systems with heterogeneous
+interconnects. The exact fleet shape, topology, hostnames, and machine-specific
+inventory remain internal.
 
-- a 9 x V100-SXM2-32GB configuration used for the April 2026 Ollama and GGUF
-  benchmark report;
-- a larger V100 pool later observed with 13 V100-class 32GB cards and mixed
-  NVLink islands.
-
-The important topology lesson is stable across both states: do not treat
-aggregate VRAM as one uniform memory pool. NVLink islands matter. A fast plan
-keeps tensor-parallel communication inside a tightly connected island and uses
-other methods for spanning weaker interconnects.
+The important lesson is stable: do not treat aggregate VRAM as one uniform
+memory pool. Interconnect class, backend behavior, and model architecture
+determine whether a configuration is a capacity lane, a speed lane, or merely a
+loading experiment.
 
 ## Volta Rules
 
-- V100 supports strong fp16 tensor-core compute but lacks bf16 tensor-core paths.
-- V100 does not have native FP8 compute.
-- V100 does not support the standard modern FlashAttention-2 path.
-- Marlin and many GPTQ/AWQ fast paths target newer GPUs. A V100 stack needs a
-  Volta-specific replacement or fallback.
-- V100 can still be useful because LLM decode is often memory-bandwidth bound
-  and because large owned VRAM pools can carry models that would otherwise be
-  expensive to serve.
+- V100 is a Volta-generation accelerator.
+- Public numbers from newer accelerator families should be treated as
+  hypotheses until validated on the target V100-class lane.
+- Modern low-precision kernels and attention implementations often require
+  backend-specific fallbacks.
+- GGUF-compatible runtimes remain useful because they provide broad model
+  coverage and simple local testing.
+- API-serving stacks are useful when they are proven on the exact model family
+  and context tier.
 
-## Working Backend Classes
+## Public Validation Rule
 
-- GGUF through `llama.cpp`-style backends is the broadest compatibility lane.
-- Ollama is useful for quick model management and was used for the April 2026
-  benchmark report.
-- vLLM is useful for API serving, but the V100 path is version-sensitive and
-  often needs V100-specific forks or flags.
-- LMDeploy/TurboMind-style W4 paths are worth testing for dense models where
-  Volta support is explicit.
+A V100 result should be public only when it has been reduced to:
 
-## Operational Finding
+- broad hardware class;
+- backend family;
+- model family or parameter class;
+- quantization family;
+- context tier;
+- success/failure category;
+- rounded throughput band where measured;
+- measured versus inferred status.
 
-The strongest public rule is not tied to one model: V100 testing must be
-proven on the actual hardware lane. Public numbers from A100/H100, or from a
-different backend, are hypotheses until the exact V100 backend, model, context,
-and prompt set are measured.
+Exact topology, failure logs, local paths, endpoints, and private machine
+details stay internal. Curated anonymous hardware profiles and successful
+settings may be published when they are useful to outside builders without
+exposing operational runbooks.
 
 ## Links
 
-- https://proprietarylegal.ai
 - https://proprietarylegal.com
+- https://proprietarylegal.ai

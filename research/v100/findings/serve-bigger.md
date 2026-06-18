@@ -7,7 +7,7 @@ Serving a bigger model is not the same as serving a model faster.
 Using more V100 cards across weaker interconnects can increase capacity, but
 single-request decode speed may not improve. The public rule is:
 
-- tensor parallelism inside an NVLink island;
+- tensor parallelism inside a tightly connected accelerator group;
 - pipeline parallelism or layer split across weaker links;
 - avoid cross-board tensor parallelism unless a benchmark proves it is worth the
   communication cost.

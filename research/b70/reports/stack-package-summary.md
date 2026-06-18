@@ -2,9 +2,9 @@
 
 ## Purpose
 
-The private B70 stack package was built to make the four-card inference island
-repeatable: kernel choice, Intel driver/runtime, xpu-smi telemetry, a tested
-container lane, and model-format readiness notes.
+The private B70 stack package was built to make local inference repeatable:
+kernel/runtime choice, Intel driver/runtime readiness, telemetry, a tested
+container lane, and model-format notes.
 
 The public repository does not publish the raw package. It publishes the
 lessons that are useful without exposing local paths, hostnames, endpoints,
@@ -13,33 +13,24 @@ install logs, checksums, or private service details.
 ## Public Components
 
 | Component | Public purpose |
-|---|---|
-| Kernel/runtime decision | Ensure the B70 cards are visible and stable under the Intel xe / Level Zero path |
-| Intel driver and firmware lane | Provide the GPU runtime needed for B70 serving and telemetry |
-| xpu-smi | Confirm device discovery, health, memory use, and power/temperature state |
-| llm-scaler / vLLM-XPU container research | Stage the tensor-parallel research lane |
-| llama.cpp SYCL server | Provide the proven 122B four-card reliability lane |
+| --- | --- |
+| Runtime decision | Ensure B70-class devices are visible and stable |
+| Driver and firmware lane | Provide the accelerator runtime and telemetry |
+| Telemetry tooling | Confirm discovery, health, and memory use |
+| XPU API-serving research | Stage the tensor-parallel research lane |
+| GGUF-compatible SYCL server | Provide the proven reliability baseline |
 | OpenVINO GenAI | Provide an exported-model alternative-stack lane |
-| Service-window scripts | Run candidates, capture metrics, and restore the known-good service |
+| Service-window method | Run candidates, capture public-safe bands, and restore known-good service |
 
 ## Lessons
 
-- Separate CUDA and XPU assumptions. B70 is not a CUDA card.
+- Separate CUDA and XPU assumptions.
 - Pin runtime stacks for benchmark claims.
 - Record served model identity before attributing a number.
-- Treat exact container tags and runtime versions as part of the benchmark.
+- Treat exact container tags and runtime versions as internal benchmark
+  provenance unless needed for a reproducibility release.
 - Do not publish raw launcher files when they contain local service details.
 - Do not promote a configuration unless restore and health checks pass.
-
-## Public Stack Shape
-
-The public stack shape is:
-
-1. B70 hardware discovery and telemetry through Intel tooling.
-2. A known-good llama.cpp SYCL server for the 122B reliability lane.
-3. XPU/vLLM and llm-scaler lanes for tensor-parallel research.
-4. OpenVINO for supported exported-model experiments.
-5. Long-context legal benchmark gates as the promotion standard.
 
 ## Release Boundary
 
@@ -47,7 +38,7 @@ The following are intentionally excluded from the public repo:
 
 - raw logs;
 - raw shell launchers;
-- endpoint URLs;
+- service URLs;
 - local filesystem paths;
 - hostnames;
 - model cache locations;

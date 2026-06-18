@@ -17,14 +17,17 @@ Start here:
 - [wiki/README.md](wiki/README.md) - public PLI Labs wiki and release thesis.
 - [reaps/README.md](reaps/README.md) - what a legal REAP is and why it differs
   from coding-oriented REAPs.
+- [huggingface/README.md](huggingface/README.md) - public Hugging Face release
+  documentation and model-repository links.
 - [finetunes/README.md](finetunes/README.md) - how PLI thinks about legal
   finetunes after pruning.
 - [tools/README.md](tools/README.md) - public tooling principles for legal AI
   pipelines.
 - [research/v100/README.md](research/v100/README.md) - V100 inference research,
-  benchmark summaries, and public testing standards.
+  public-safe benchmark summaries, and testing standards.
 - [research/b70/README.md](research/b70/README.md) - Intel Arc Pro B70
-  inference research, stack findings, and four-card legal-context benchmarks.
+  inference research, sanitized stack findings, and legal-context benchmark
+  bands.
 
 ## Repository Boundaries
 
@@ -36,12 +39,13 @@ Start here:
 
 ## Current Status
 
-Initial public documentation scaffold. The MiniMax-M2.7 0.35 and 0.45 legal
-REAP materials are published as benchmark-backed candidate notes. Current
-Opus-parity bench testing indicates both prunes are performing well; sanitized
-score summaries should be added before any formal model-card release.
+The MiniMax-M2.7 0.35 and 0.45 legal REAP materials are published as
+benchmark-backed candidate notes with Hugging Face release documentation.
+Current internal legal evaluation indicates both prunes are promising;
+sanitized aggregate score summaries should be added before broader
+validated-release claims.
 
 ## Links
 
-- Website: https://proprietarylegal.ai
-- Alternate domain: https://proprietarylegal.com
+- Website: https://proprietarylegal.com
+- Research site: https://proprietarylegal.ai
