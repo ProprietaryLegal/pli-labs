@@ -23,6 +23,8 @@ Start here:
   pipelines.
 - [research/v100/README.md](research/v100/README.md) - V100 inference research,
   benchmark summaries, and public testing standards.
+- [research/b70/README.md](research/b70/README.md) - Intel Arc Pro B70
+  inference research, stack findings, and four-card legal-context benchmarks.
 
 ## Repository Boundaries
 
