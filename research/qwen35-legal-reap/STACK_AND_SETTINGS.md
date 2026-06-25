@@ -67,12 +67,13 @@ total while preserving the top-8 routing pattern.
 
 | Field | Value |
 | --- | --- |
-| HF repo | ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16 |
+| HF repo | ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap |
 | Layers | 48 |
 | Routed experts per MoE layer | 216 |
 | Experts per token | 8 |
 | Indexed weight entries | 31,839 |
 | Indexed tensor bytes | 207,972,470,784 |
+| Estimated total parameters | about 104B |
 | Local shard count | 5 safetensors shards |
 | Local artifact size | about 194G |
 
@@ -92,9 +93,9 @@ File inventory:
 | config.json | 2,531 |
 | generation_config.json | 219 |
 
-## LayerDrop-6 Settings
+## Layerdrop6 Settings
 
-The LayerDrop-6 derivative starts from the 0.16 REAP checkpoint and removes six
+The Layerdrop6 derivative starts from the 0.16 REAP checkpoint and removes six
 decoder layers:
 
 ```text
@@ -104,17 +105,18 @@ decoder layers:
 This reduces the model from 48 layers to 42 layers while keeping the REAP-0.16
 expert count of 216 routed experts per remaining MoE layer.
 
-## LayerDrop-6 Artifact Facts
+## Layerdrop6 Artifact Facts
 
 | Field | Value |
 | --- | --- |
-| HF repo | ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6 |
-| Parent checkpoint | ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16 |
+| HF repo | ProprietaryLegal/Qwen3.5-91b-a10b-LegalReap-Layerdrop6 |
+| Parent checkpoint | ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap |
 | Layers | 42 |
 | Routed experts per MoE layer | 216 |
 | Experts per token | 8 |
 | Indexed weight entries | 27,855 |
 | Indexed tensor bytes | 182,327,694,336 |
+| Estimated total parameters | about 91B |
 | Local shard count | 4 safetensors shards |
 | Local artifact size | about 170G |
 
@@ -139,8 +141,8 @@ No separate expert-merged Qwen3.5 checkpoint is included in this publication.
 Expert merging remains a follow-on research lane. The public release consists
 of:
 
-1. the 48-layer expert-reduced REAP 0.16 checkpoint; and
-2. the 42-layer LayerDrop-6 derivative.
+1. Qwen3.5-104b-a10b-LegalReap, the 48-layer expert-reduced checkpoint; and
+2. Qwen3.5-91b-a10b-LegalReap-Layerdrop6, the 42-layer derivative.
 
 Raw private run configuration files that contain local filesystem paths are
 not published to Hugging Face. This file is the public-safe replacement.

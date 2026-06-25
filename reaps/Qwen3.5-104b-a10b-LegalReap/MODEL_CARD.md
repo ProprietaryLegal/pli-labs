@@ -1,8 +1,8 @@
-# Model Card: Qwen3.5-122B-A10B Legal REAP 0.16
+# Model Card: Qwen3.5-104b-a10b-LegalReap
 
 ## Summary
 
-Qwen3.5-122B-A10B Legal REAP 0.16 is a conservative legal-domain expert-pruned candidate from
+Qwen3.5-104b-a10b-LegalReap is a conservative legal-domain expert-pruned candidate from
 PLI Labs. It was built to test whether a very large open mixture-of-experts model can be
 reduced around legal drafting, factual synthesis, source-grounded review, refusal behavior, and
 workflow-sensitive analysis without cutting beyond the stable expert core.
@@ -14,7 +14,7 @@ requires attorney supervision and independent source verification.
 
 | Field | Value |
 | --- | --- |
-| Release name | Qwen3.5-122B-A10B Legal REAP 0.16 |
+| Release name | Qwen3.5-104b-a10b-LegalReap |
 | Publisher | PLI Labs / Proprietary Legal Intelligence |
 | Release status | Research candidate |
 | Base model | Qwen/Qwen3.5-122B-A10B |
@@ -30,6 +30,7 @@ requires attorney supervision and independent source verification.
 | Experts per token | 8 routed experts |
 | Indexed weight entries | 31,839 |
 | Indexed tensor bytes | 207,972,470,784 |
+| Estimated total parameters | about 104B |
 | Local artifact size | about 194G |
 | Contact | nick@proprietarylegal.com |
 
@@ -110,6 +111,6 @@ GitHub. Checksums will be added after public weight upload verification.
 
 ## Links
 
-- Hugging Face target: https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16
+- Hugging Face target: https://huggingface.co/ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap
 - GitHub documentation: https://github.com/ProprietaryLegal/pli-labs
 - Proprietary Legal: https://proprietarylegal.com

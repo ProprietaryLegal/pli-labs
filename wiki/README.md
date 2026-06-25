@@ -28,7 +28,8 @@ how that behavior was checked.
 - [legal-reap-thesis.md](legal-reap-thesis.md) - why legal REAPs should not be
   copied from coding REAP assumptions.
 - [qwen35-legal-reap-campaign.md](qwen35-legal-reap-campaign.md) - public
-  campaign narrative for the Qwen3.5 Legal REAP 0.16 and LayerDrop-6 releases.
+  campaign narrative for Qwen3.5-104b-a10b-LegalReap and
+  Qwen3.5-91b-a10b-LegalReap-Layerdrop6.
 - [minimax-m2.7-legal-reap-campaign.md](minimax-m2.7-legal-reap-campaign.md) -
   public campaign narrative for the MiniMax-M2.7 0.35 and 0.45 legal prunes.
 

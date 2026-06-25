@@ -14,18 +14,18 @@ tags:
 - layerdrop
 - expert-pruning
 - text-generation
-base_model: ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16
+base_model: ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap
 ---
 
-# Qwen3.5-122B-A10B Legal REAP 0.16 LayerDrop-6
+# Qwen3.5-91b-a10b-LegalReap-Layerdrop6
 
-Qwen3.5-122B-A10B Legal REAP 0.16 LayerDrop-6 is the depth-reduced companion to
+Qwen3.5-91b-a10b-LegalReap-Layerdrop6 is the depth-reduced companion to
 PLI Labs' conservative Qwen3.5 legal REAP checkpoint. It starts from the
 REAP-0.16 model and removes six low-impact decoder layers selected by a
 calibration-driven layer-importance pass.
 
 This release explores a second compression axis. REAP reduces routed expert
-capacity; LayerDrop reduces depth. The result keeps 216 routed experts per
+capacity; Layerdrop6 reduces depth. The result keeps 216 routed experts per
 remaining MoE layer and reduces the network from 48 layers to 42 layers.
 
 This is a research/evaluation release, not an unsupervised legal advice system.
@@ -33,7 +33,7 @@ Legal use requires attorney supervision and independent source verification.
 
 ## Release Positioning
 
-The LayerDrop-6 model is intentionally presented as a companion artifact, not as
+The Layerdrop6 model is intentionally presented as a companion artifact, not as
 a replacement for the 48-layer REAP-0.16 checkpoint. It is for evaluators who
 want to compare legal behavior across:
 
@@ -48,7 +48,7 @@ want to compare legal behavior across:
 | Model family | Qwen3.5 MoE |
 | Publisher | PLI Labs / Proprietary Legal Intelligence |
 | Release status | Research candidate |
-| Parent checkpoint | ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16 |
+| Parent checkpoint | ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap |
 | Original base model | Qwen/Qwen3.5-122B-A10B |
 | Base license | Apache-2.0 |
 | Format | Transformers/safetensors checkpoint |
@@ -67,6 +67,7 @@ want to compare legal behavior across:
 | Vocabulary size | 248,320 |
 | Indexed weight entries | 27,855 |
 | Indexed tensor bytes | 182,327,694,336 |
+| Estimated total parameters | about 91B |
 | Contact | nick@proprietarylegal.com |
 
 ## Intended Use
@@ -128,15 +129,15 @@ This public release intentionally excludes:
 - Layer removal can produce different degradation patterns from expert pruning.
 - Strong fluency is not proof of legal reliability.
 - Public aggregate evaluation tables are still pending.
-- This is not an expert-merged checkpoint; it is a LayerDrop derivative of an
+- This is not an expert-merged checkpoint; it is a Layerdrop6 derivative of an
   expert-reduced REAP checkpoint.
 - All legal outputs require attorney review and source verification.
 
 ## Links
 
-- Parent model: https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16
+- Parent model: https://huggingface.co/ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap
 - GitHub documentation: https://github.com/ProprietaryLegal/pli-labs
 - Research packet: https://github.com/ProprietaryLegal/pli-labs/tree/main/research/qwen35-legal-reap
-- Model card mirror: https://github.com/ProprietaryLegal/pli-labs/blob/main/reaps/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6/MODEL_CARD.md
+- Model card mirror: https://github.com/ProprietaryLegal/pli-labs/blob/main/reaps/Qwen3.5-91b-a10b-LegalReap-Layerdrop6/MODEL_CARD.md
 - Proprietary Legal: https://proprietarylegal.com
 - PLI research site: https://proprietarylegal.ai

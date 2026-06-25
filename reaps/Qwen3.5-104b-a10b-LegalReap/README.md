@@ -1,13 +1,13 @@
-# Qwen3.5-122B-A10B Legal REAP 0.16
+# Qwen3.5-104b-a10b-LegalReap
 
 Formal candidate model card: [MODEL_CARD.md](MODEL_CARD.md).
 
 Target Hugging Face checkpoint:
-[ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16).
+[ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap](https://huggingface.co/ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap).
 
 ## Summary
 
-Qwen3.5-122B-A10B Legal REAP 0.16 is PLI Labs' conservative legal-domain expert-pruned
+Qwen3.5-104b-a10b-LegalReap is PLI Labs' conservative legal-domain expert-pruned
 Qwen3.5 candidate. It starts from Qwen3.5-122B-A10B and removes the stable low-saliency expert
 core observed under legal calibration, reducing each MoE layer from 256 routed experts to 216
 while preserving the original 48-layer depth, hidden size, tokenizer, and top-8 routing pattern.
@@ -26,6 +26,7 @@ stable droppable core rather than chasing a larger headline compression number.
 Public-safe facts:
 
 - Base model: Qwen3.5-122B-A10B.
+- Estimated parameter count: about 104B.
 - Method: REAP-style routed-expert pruning with survivor router renormalization.
 - Expert count: 256 -> 216 routed experts per MoE layer.
 - Layer count: 48 layers retained.
@@ -34,7 +35,7 @@ Public-safe facts:
 
 ## Links
 
-- Hugging Face target: https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16
+- Hugging Face target: https://huggingface.co/ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap
 - PLI Labs GitHub: https://github.com/ProprietaryLegal/pli-labs
 - Model card: [MODEL_CARD.md](MODEL_CARD.md)
 - Checksums: to be added after public weight upload verification.
