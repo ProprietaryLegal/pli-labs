@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PLI Labs Releases Qwen3.5 Legal REAP Models</title>
+  <meta name="description" content="PLI Labs releases Qwen3.5 legal REAP models for lawyer-supervised legal AI evaluation.">
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #526071;
+      --rule: #d9dee8;
+      --accent: #1b5cff;
+      --paper: #ffffff;
+      --wash: #f6f7fa;
+    }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.62;
+    }
+    main {
+      width: min(760px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 56px 0 72px;
+    }
+    header {
+      border-bottom: 1px solid var(--rule);
+      margin-bottom: 32px;
+      padding-bottom: 26px;
+    }
+    .eyebrow {
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.35rem);
+      line-height: 1.05;
+      margin: 12px 0 16px;
+      letter-spacing: 0;
+    }
+    h2 {
+      font-size: 1.35rem;
+      margin: 34px 0 12px;
+    }
+    p, li {
+      color: var(--muted);
+      font-size: 1.03rem;
+    }
+    a {
+      color: var(--accent);
+      text-decoration-thickness: 0.08em;
+      text-underline-offset: 0.18em;
+    }
+    .links {
+      background: var(--wash);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 18px 22px;
+    }
+    footer {
+      border-top: 1px solid var(--rule);
+      margin-top: 44px;
+      padding-top: 18px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">PLI Labs</div>
+      <h1>PLI Labs Releases Qwen3.5 Legal REAP Models For Lawyer-Supervised Evaluation</h1>
+      <p>Two public Qwen3.5 legal-compression candidates are now available on Hugging Face, with supporting documentation in the PLI Labs GitHub repository.</p>
+    </header>
+
+    <section class="links" aria-label="Model links">
+      <strong>Model links</strong>
+      <ul>
+        <li><a href="https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16">Qwen3.5-122B-A10B Legal REAP 0.16</a></li>
+        <li><a href="https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6">Qwen3.5-122B-A10B Legal REAP 0.16 LayerDrop-6</a></li>
+      </ul>
+    </section>
+
+    <h2>What Was Released</h2>
+    <p>The first artifact, Legal REAP 0.16, is a conservative expert-reduced checkpoint derived from Qwen3.5-122B-A10B. It reduces each MoE layer from 256 routed experts to 216 while preserving 48 layers, the tokenizer, hidden size, and top-8 routing pattern.</p>
+    <p>The second artifact, Legal REAP 0.16 LayerDrop-6, is a smaller companion model. It starts from the 0.16 REAP checkpoint and removes six decoder layers: 8, 9, 12, 13, 16, and 17.</p>
+
+    <h2>Why A Legal REAP</h2>
+    <p>Most open model compression work is judged against generic or coding-heavy benchmarks. Legal work stresses different behavior. A useful legal assistant has to preserve factual care, source fidelity, drafting judgment, refusal discipline, and workflow awareness.</p>
+    <p>PLI Labs built this release around that premise. The goal was not to create an autonomous lawyer. The goal was to produce research artifacts for lawyer-supervised evaluation of a frontier-scale open MoE model compressed around legal work.</p>
+
+    <h2>Why The Cut Is Conservative</h2>
+    <p>The Qwen3.5 run showed a flatter expert-saliency profile than expected. In plain terms: this model resisted obvious aggressive pruning. Instead of forcing a larger compression claim, PLI Labs published the stable 0.16 expert cut and a separate LayerDrop derivative.</p>
+    <p>That makes the release more useful. Legal AI does not need inflated compression headlines. It needs inspectable models, clear caveats, and evaluation paths that legal teams can reproduce.</p>
+
+    <h2>Public Documentation</h2>
+    <ul>
+      <li><a href="https://github.com/ProprietaryLegal/pli-labs/tree/main/research/qwen35-legal-reap">Qwen3.5 legal REAP research packet</a></li>
+      <li><a href="https://github.com/ProprietaryLegal/pli-labs/blob/main/research/qwen35-legal-reap/STACK_AND_SETTINGS.md">Stack and settings summary</a></li>
+      <li><a href="https://github.com/ProprietaryLegal/pli-labs/blob/main/reaps/qwen35-122b-a10b-legal-reap-0.16/MODEL_CARD.md">Legal REAP 0.16 model card</a></li>
+      <li><a href="https://github.com/ProprietaryLegal/pli-labs/blob/main/reaps/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6/MODEL_CARD.md">LayerDrop-6 model card</a></li>
+    </ul>
+
+    <h2>Intended Use</h2>
+    <p>These models are research candidates for lawyer-supervised evaluation. They are appropriate for controlled testing of legal drafting, revision, summarization, workflow behavior, and source-grounded analysis. They are not unsupervised legal advice systems, and they are not a substitute for attorney review.</p>
+
+    <footer>
+      Proprietary Legal Intelligence. Public materials intentionally exclude private legal source items, client names, privileged work product, private prompts, credentials, and tokens.
+    </footer>
+  </main>
+</body>
+</html>

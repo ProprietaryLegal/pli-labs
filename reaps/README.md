@@ -24,6 +24,14 @@ The intended benefits are:
 
 ## Current Public Case Studies
 
+- [Qwen3.5-122B-A10B legal REAP 0.16](qwen35-122b-a10b-legal-reap-0.16/README.md)
+  ([model card](qwen35-122b-a10b-legal-reap-0.16/MODEL_CARD.md),
+  [Hugging Face](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16))
+- [Qwen3.5-122B-A10B legal REAP 0.16 LayerDrop-6](qwen35-122b-a10b-legal-reap-0.16-layerdrop-6/README.md)
+  ([model card](qwen35-122b-a10b-legal-reap-0.16-layerdrop-6/MODEL_CARD.md),
+  [Hugging Face](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6))
+- [Qwen3.5 legal REAP research packet](../research/qwen35-legal-reap/README.md)
+  and [campaign narrative](../wiki/qwen35-legal-reap-campaign.md)
 - [MiniMax-M2.7 legal REAP 0.35](minimax-m2.7-legal-reap-0.35/README.md)
   ([model card](minimax-m2.7-legal-reap-0.35/MODEL_CARD.md),
   [Hugging Face](https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.35))
@@ -42,10 +50,11 @@ sanitized score summaries are pending. The linked model cards formalize the
 candidate status, intended use, limitations, and privacy boundary without
 inventing public benchmark numbers.
 
-The Hugging Face repositories are public release locations for model artifacts
-and model-card documentation. They intentionally avoid private infrastructure
-details such as hostnames, local paths, endpoint ports, exact deployment
-topology, and failure runbooks.
+The Qwen3.5 pages document a conservative expert-reduced legal REAP and a
+LayerDrop companion. The Hugging Face repositories are public release locations
+for model artifacts and model-card documentation. They intentionally avoid
+private infrastructure details such as hostnames, local paths, endpoint ports,
+exact deployment topology, and failure runbooks.
 
 ## Legal REAP Checklist
 
