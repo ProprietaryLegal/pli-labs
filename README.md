@@ -19,6 +19,11 @@ Start here:
   from coding-oriented REAPs.
 - [huggingface/README.md](huggingface/README.md) - public Hugging Face release
   documentation and model-repository links.
+- [research/qwen35-legal-reap/README.md](research/qwen35-legal-reap/README.md)
+  - Qwen3.5 legal REAP research packet, public settings, and artifact
+  inventory.
+- [blog/proprietarylegal/README.md](blog/proprietarylegal/README.md) - blog
+  drafts and deployable HTML for ProprietaryLegal.com.
 - [finetunes/README.md](finetunes/README.md) - how PLI thinks about legal
   finetunes after pruning.
 - [tools/README.md](tools/README.md) - public tooling principles for legal AI
@@ -41,9 +46,11 @@ Start here:
 
 The MiniMax-M2.7 0.35 and 0.45 legal REAP materials are published as
 benchmark-backed candidate notes with Hugging Face release documentation.
-Current internal legal evaluation indicates both prunes are promising;
-sanitized aggregate score summaries should be added before broader
-validated-release claims.
+
+The Qwen3.5-122B-A10B Legal REAP 0.16 and LayerDrop-6 artifacts are public
+research candidates with Hugging Face repositories, model cards, a settings
+packet, and blog-ready launch materials. Public aggregate legal benchmark
+tables should be added before broader validated-release claims.
 
 ## Links
 

@@ -5,11 +5,18 @@ Labs model repositories.
 
 ## Published Repositories
 
+- [Qwen3.5-122B-A10B Legal REAP 0.16](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16)
+- [Qwen3.5-122B-A10B Legal REAP 0.16 LayerDrop-6](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6)
 - [MiniMax-M2.7 Legal REAP 0.35](https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.35)
 - [MiniMax-M2.7 Legal REAP 0.45](https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.45)
 - [MiniMax-M2.7 Legal REAP 0.35 GGUF](https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.35-gguf)
 - [MiniMax-M2.7 Legal REAP 0.45 GGUF](https://huggingface.co/ProprietaryLegal/minimax-m2.7-legal-reap-0.45-gguf)
 - [MiniMax-M2.7 REAP 172B-A10B Q4_K_M GGUF](https://huggingface.co/ProprietaryLegal/minimax-m2.7-reap-172b-a10b-q4-k-m-gguf)
+
+## Model Card Sources
+
+- [qwen35-122b-a10b-legal-reap-0.16/README.md](qwen35-122b-a10b-legal-reap-0.16/README.md)
+- [qwen35-122b-a10b-legal-reap-0.16-layerdrop-6/README.md](qwen35-122b-a10b-legal-reap-0.16-layerdrop-6/README.md)
 
 ## Documentation Boundary
 
