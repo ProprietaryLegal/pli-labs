@@ -6,8 +6,8 @@ behavior without treating coding benchmarks as the center of the world?
 
 The public release includes:
 
-- [Qwen3.5-122B-A10B Legal REAP 0.16](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16)
-- [Qwen3.5-122B-A10B Legal REAP 0.16 LayerDrop-6](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6)
+- [Qwen3.5-104b-a10b-LegalReap](https://huggingface.co/ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap)
+- [Qwen3.5-91b-a10b-LegalReap-Layerdrop6](https://huggingface.co/ProprietaryLegal/Qwen3.5-91b-a10b-LegalReap-Layerdrop6)
 
 ## The Method
 
@@ -28,20 +28,22 @@ important result is that Qwen3.5-122B-A10B appears prune-resistant.
 The saliency profile did not support a confident aggressive expert cut. PLI Labs
 therefore published a conservative 0.16 release: each MoE layer goes from 256
 routed experts to 216, while retaining the original 48-layer depth and top-8
-routing pattern.
+routing pattern. That produces an approximately 104B-parameter bf16 checkpoint
+derived from the 122B-A10B base model.
 
 This matters because legal AI compression should not be driven by the desire for
 a clean marketing number. If the model resists pruning, the correct research
 answer is to say so and preserve the legal behavior that appears most important.
 
-## The Companion LayerDrop Model
+## The Companion Qwen3.5-91b-a10b-LegalReap-Layerdrop6 Model
 
-The LayerDrop-6 checkpoint asks a different question. After the conservative
-expert prune, can depth be reduced in a controlled way?
+The Layerdrop6 checkpoint asks a different question. After the conservative
+104B expert prune, can depth be reduced in a controlled way?
 
 The companion model removes layers 8, 9, 12, 13, 16, and 17 from the REAP-0.16
 checkpoint, reducing the model from 48 layers to 42 while retaining 216 routed
-experts per remaining MoE layer.
+experts per remaining MoE layer. The resulting companion checkpoint is about
+91B parameters.
 
 That does not prove the smaller model is better. It gives legal evaluators a
 clean comparison point: base model versus expert-reduced model versus

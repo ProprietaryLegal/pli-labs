@@ -16,9 +16,9 @@ tags:
 base_model: Qwen/Qwen3.5-122B-A10B
 ---
 
-# Qwen3.5-122B-A10B Legal REAP 0.16
+# Qwen3.5-104b-a10b-LegalReap
 
-Qwen3.5-122B-A10B Legal REAP 0.16 is PLI Labs' conservative legal-domain
+Qwen3.5-104b-a10b-LegalReap is PLI Labs' conservative legal-domain
 expert-reduced Qwen3.5 candidate. It starts from Qwen3.5-122B-A10B and removes
 the stable low-saliency routed-expert core observed under a legal calibration
 workload, reducing each MoE layer from 256 routed experts to 216 while
@@ -70,6 +70,7 @@ The public claim is deliberately specific:
 | Vocabulary size | 248,320 |
 | Indexed weight entries | 31,839 |
 | Indexed tensor bytes | 207,972,470,784 |
+| Estimated total parameters | about 104B |
 | Contact | nick@proprietarylegal.com |
 
 ## Intended Use
@@ -154,6 +155,6 @@ GitHub documentation.
 
 - GitHub documentation: https://github.com/ProprietaryLegal/pli-labs
 - Research packet: https://github.com/ProprietaryLegal/pli-labs/tree/main/research/qwen35-legal-reap
-- Model card mirror: https://github.com/ProprietaryLegal/pli-labs/blob/main/reaps/qwen35-122b-a10b-legal-reap-0.16/MODEL_CARD.md
+- Model card mirror: https://github.com/ProprietaryLegal/pli-labs/blob/main/reaps/Qwen3.5-104b-a10b-LegalReap/MODEL_CARD.md
 - Proprietary Legal: https://proprietarylegal.com
 - PLI research site: https://proprietarylegal.ai

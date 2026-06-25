@@ -9,8 +9,8 @@ other legal AI builders to inspect the method.
 
 Two public model repositories are part of this campaign:
 
-- [Qwen3.5-122B-A10B Legal REAP 0.16](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16)
-- [Qwen3.5-122B-A10B Legal REAP 0.16 LayerDrop-6](https://huggingface.co/ProprietaryLegal/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6)
+- [Qwen3.5-104b-a10b-LegalReap](https://huggingface.co/ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap)
+- [Qwen3.5-91b-a10b-LegalReap-Layerdrop6](https://huggingface.co/ProprietaryLegal/Qwen3.5-91b-a10b-LegalReap-Layerdrop6)
 
 The first model is an expert-reduced REAP checkpoint. It reduces each MoE layer
 from 256 routed experts to 216 while retaining 48 layers and top-8 routing. The
@@ -36,16 +36,17 @@ larger compression result.
 
 ## Public Technical Summary
 
-| Item | Legal REAP 0.16 | LayerDrop-6 |
+| Item | Qwen3.5-104b-a10b-LegalReap | Qwen3.5-91b-a10b-LegalReap-Layerdrop6 |
 | --- | --- | --- |
 | Base | Qwen/Qwen3.5-122B-A10B | Legal REAP 0.16 |
+| Estimated parameters | about 104B | about 91B |
 | Layers | 48 | 42 |
 | Routed experts per layer | 216 | 216 |
 | Original experts per layer | 256 | 256 |
 | Experts per token | 8 | 8 |
 | Release posture | Research candidate | Research candidate |
 
-The LayerDrop-6 checkpoint removes layers 8, 9, 12, 13, 16, and 17.
+The Layerdrop6 checkpoint removes layers 8, 9, 12, 13, 16, and 17.
 
 ## Boundaries
 
@@ -62,5 +63,5 @@ attorney supervision and independent source verification.
 
 - [Research packet](../research/qwen35-legal-reap/README.md)
 - [Stack and settings](../research/qwen35-legal-reap/STACK_AND_SETTINGS.md)
-- [Legal REAP 0.16 model card](../reaps/qwen35-122b-a10b-legal-reap-0.16/MODEL_CARD.md)
-- [LayerDrop-6 model card](../reaps/qwen35-122b-a10b-legal-reap-0.16-layerdrop-6/MODEL_CARD.md)
+- [Qwen3.5-104b-a10b-LegalReap model card](../reaps/Qwen3.5-104b-a10b-LegalReap/MODEL_CARD.md)
+- [Qwen3.5-91b-a10b-LegalReap-Layerdrop6 model card](../reaps/Qwen3.5-91b-a10b-LegalReap-Layerdrop6/MODEL_CARD.md)
