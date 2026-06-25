@@ -88,10 +88,11 @@ credentials, and tokens.
 - This is not an expert-merged checkpoint; it is REAP-0.16 plus layerdrop.
 - All legal use requires attorney review and source verification.
 
-## Checksums
+## Upload Verification
 
 Public model weights are distributed through Hugging Face, not committed to
-GitHub. Checksums will be added after public weight upload verification.
+GitHub. Hugging Face file presence and byte sizes were verified on 2026-06-25.
+A separate checksum audit is not yet published.
 
 ## Links
 

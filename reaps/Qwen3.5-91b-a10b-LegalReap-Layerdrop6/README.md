@@ -31,4 +31,5 @@ network from 48 to 42 layers.
 - Hugging Face target: https://huggingface.co/ProprietaryLegal/Qwen3.5-91b-a10b-LegalReap-Layerdrop6
 - PLI Labs GitHub: https://github.com/ProprietaryLegal/pli-labs
 - Model card: [MODEL_CARD.md](MODEL_CARD.md)
-- Checksums: to be added after public weight upload verification.
+- Upload verification: Hugging Face file presence and byte sizes verified on
+  2026-06-25; a separate checksum audit is not yet published.

@@ -104,10 +104,11 @@ This public card intentionally excludes:
 - This is not an expert-merged checkpoint; it is an expert-reduced REAP checkpoint.
 - All legal outputs require attorney review and source verification.
 
-## Checksums
+## Upload Verification
 
 Public model weights are distributed through Hugging Face, not committed to
-GitHub. Checksums will be added after public weight upload verification.
+GitHub. Hugging Face file presence and byte sizes were verified on 2026-06-25.
+A separate checksum audit is not yet published.
 
 ## Links
 

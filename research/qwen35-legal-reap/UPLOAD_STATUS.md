@@ -9,6 +9,15 @@ Public model repositories:
 - https://huggingface.co/ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap
 - https://huggingface.co/ProprietaryLegal/Qwen3.5-91b-a10b-LegalReap-Layerdrop6
 
+Status: public upload completed and file presence verified on 2026-06-25.
+
+Verified public file totals:
+
+| Repository | Files | Safetensors shards | Total public bytes |
+| --- | ---: | ---: | ---: |
+| ProprietaryLegal/Qwen3.5-104b-a10b-LegalReap | 13 | 5 | 208,000,358,231 |
+| ProprietaryLegal/Qwen3.5-91b-a10b-LegalReap-Layerdrop6 | 12 | 4 | 182,354,594,762 |
+
 The release upload intentionally excludes raw private run settings that contain
 machine-local paths. The published model cards link back to this public settings
 packet instead.
