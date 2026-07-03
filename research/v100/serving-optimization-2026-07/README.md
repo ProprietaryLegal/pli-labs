@@ -23,7 +23,8 @@ practice's drafting, review, extraction, and reasoning lanes.
 | Prefix caching, 12k-token system prompt | 93.1 s | 1.4–1.6 s | **61.7x** |
 | Mixed-type KV-cache prefill (missing FA kernels) | 79–94 t/s | 154–161 t/s | **~2x cliff removed** |
 | Qwen3.6-27B (GDN hybrid) on one 32GB V100 | did not fit (OOM) | 27.8 t/s decode | **unservable → served** |
-| vLLM decode via CUDA graphs (sm_70) | 51.6 t/s eager | 132.8 t/s | **2.56x** |
+| vLLM decode via CUDA graphs (sm_70, 4B proof model) | 51.6 t/s eager | 132.8 t/s | **2.56x** |
+| vLLM Qwen3.5-122B, tensor-parallel-4 + CUDA graphs | 14.8 t/s eager | **67.6 t/s** | **4.5x** |
 | Gemma-4 lane throughput per GPU (lane redesign†) | 40 t/s on 4 GPUs (10 t/s/GPU) | 101.3 t/s on 1 GPU | **~10x per GPU†** |
 | Qwen3.5-122B-A10B vs stock Ollama baseline | 38 t/s | **61.8 t/s (3-run verified)** | **1.6x** |
 
@@ -144,6 +145,16 @@ Capture cost 14 s and 0.75 GiB once at startup; output was **bit-identical**
 to eager. Decode improves 2.56x; prefill is unchanged (graphs remove launch
 overhead, which only dominates at generation batch sizes).
 
+**The production-scale result:** the same experiment at tensor-parallel-4 on
+Qwen3.5-122B-A10B (the first known TP4 graph capture on sm_70 — 57 s, 0.21 GiB
+per rank, no crash): eager 14.8 t/s → **graphs 67.0–67.6 t/s single-stream
+(4.5x)**, 3,395 t/s prefill, 66.7 t/s aggregate @4 streams. That beats the
+tuned llama.cpp recipe (61.8 t/s, 3-run verified) by ~9% single-stream and
+6.7x on prefill — and it means the conventional "eager-only on Volta" policy
+was itself the bottleneck. One honesty note: on this hybrid-MoE architecture,
+graph output is coherent but *not* bit-identical to eager (it was bit-identical
+on the dense proof model) — quality comparisons should run graphs-vs-graphs.
+
 Getting to this number also surfaced three real build/packaging defects in
 the fork (a torch-version gate that silently drops the entire generic op
 library, a stale bundled attention module, and a device-visibility parser
@@ -197,7 +208,7 @@ gate.
 | Qwen3.5-122B MoE | build-recipe A/B | 57.6 t/s (FORCE_MMQ + q8 KV) | 61.8 t/s (plain + f16) | **3-run verified — settles the recipe** |
 | Qwen3.6-27B hybrid | serve on one 32 GB V100 | out of memory (63/64 layers) | 27.8 t/s, coherent | **reproducible A/B (published patch)** |
 | Qwen3-4B (proof model) | vLLM decode, eager vs CUDA graphs | 51.6 t/s | 132.8 t/s | **measured A/B, bit-identical output** |
-| Qwen3.5-122B | vLLM TP4 + CUDA graphs | 77 t/s (historical TP2 anchor) | in measurement | running |
+| Qwen3.5-122B | vLLM TP4: eager vs CUDA graphs | 14.8 t/s (eager) | **67.6 t/s** (+3,395 t/s prefill, 66.7 @4) | **measured A/B — new best 122B profile on the fleet** |
 
 One verification row (32k-token prefill) thermal-aborted at the fleet's 83 °C
 safety threshold and is pending a cooler window — published when it lands, like
