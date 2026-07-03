@@ -40,10 +40,14 @@ backend, quantization path, context tier, and workload are tested together.
 ## July 2026 optimization sprint (copy block)
 
 One session on owned V100 hardware, every number measured with full
-provenance: 36.7–61.7x faster prompt processing for repeated legal system
+provenance: 36.7–86.6x faster time-to-first-token for repeated legal system
 prompts, a 2x hidden KV-cache cliff removed with one build flag, a
 previously-unservable 27B hybrid model brought up on a single 32GB card via
-a published patch, 2.56x decode from CUDA graphs on hardware the ecosystem
-had written off, and a ~10x per-GPU lane win from model-level analysis —
-plus the negative results and the driver-wedge ban that keep a production
-fleet stable. Full tables: research/v100/serving-optimization-2026-07/.
+a published patch, 2.56–4.5x decode from CUDA graphs on hardware the
+ecosystem had written off (a 122B MoE taken from a measured 39.7 t/s stock
+baseline to 67.6 t/s, via the first known tensor-parallel-4 graph capture
+on sm_70), and a ~10x per-GPU lane win from model-level analysis — plus the
+negative results that keep a production fleet honest: the driver-wedge ban,
+and the finding that our own tuned build regresses single-card dense
+prefill by 35% (recipes are shape-dependent; we publish that too). Full
+tables: research/v100/serving-optimization-2026-07/.

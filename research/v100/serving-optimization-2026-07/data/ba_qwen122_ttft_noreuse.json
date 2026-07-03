@@ -1,0 +1,42 @@
+{
+ "tag": "noreuse",
+ "prefix_target_tokens": 6000,
+ "rows": [
+  {
+   "label": "noreuse-cold-0",
+   "prompt_n": 6050,
+   "prompt_ms": 9734.798,
+   "predicted_n": 16,
+   "predicted_ms": 278.267,
+   "wall_ms": 10046.1,
+   "tokens_cached": 6065
+  },
+  {
+   "label": "noreuse-warm-0",
+   "prompt_n": 510,
+   "prompt_ms": 1089.871,
+   "predicted_n": 16,
+   "predicted_ms": 276.548,
+   "wall_ms": 1402.5,
+   "tokens_cached": 6059
+  },
+  {
+   "label": "noreuse-cold-1",
+   "prompt_n": 6050,
+   "prompt_ms": 9493.338,
+   "predicted_n": 16,
+   "predicted_ms": 273.737,
+   "wall_ms": 10027.4,
+   "tokens_cached": 6065
+  },
+  {
+   "label": "noreuse-warm-1",
+   "prompt_n": 510,
+   "prompt_ms": 1079.372,
+   "predicted_n": 16,
+   "predicted_ms": 276.405,
+   "wall_ms": 1387.6,
+   "tokens_cached": 6059
+  }
+ ]
+}
