@@ -151,7 +151,13 @@ per rank, no crash): eager 14.8 t/s → **graphs 67.0–67.6 t/s single-stream
 (4.5x)**, 3,395 t/s prefill, 66.7 t/s aggregate @4 streams. That beats the
 tuned llama.cpp recipe (61.8 t/s, 3-run verified) by ~9% single-stream and
 6.7x on prefill — and it means the conventional "eager-only on Volta" policy
-was itself the bottleneck. One honesty note: on this hybrid-MoE architecture,
+was itself the bottleneck. Follow-up validation extended the lane to a
+**65,536-token context window** (TP4 graph capture at 64k intact; 27k- and
+62k-token buried-fact recalls both correct; 663k tokens of KV headroom at
+0.90 memory utilization), and a task-level quality gate cleared it for
+production: correct on statute citation, arithmetic, strict-JSON extraction,
+format compliance, and both long recalls, with one flagged suspect case
+citation — the standard cite-check discipline for any LLM legal output. One honesty note: on this hybrid-MoE architecture,
 graph output is coherent but *not* bit-identical to eager (it was bit-identical
 on the dense proof model) — quality comparisons should run graphs-vs-graphs.
 
