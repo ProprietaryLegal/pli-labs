@@ -36,3 +36,14 @@ backend, quantization path, context tier, and workload are tested together.
 
 - https://proprietarylegal.com
 - https://proprietarylegal.ai
+
+## July 2026 optimization sprint (copy block)
+
+One session on owned V100 hardware, every number measured with full
+provenance: 36.7–61.7x faster prompt processing for repeated legal system
+prompts, a 2x hidden KV-cache cliff removed with one build flag, a
+previously-unservable 27B hybrid model brought up on a single 32GB card via
+a published patch, 2.56x decode from CUDA graphs on hardware the ecosystem
+had written off, and a ~10x per-GPU lane win from model-level analysis —
+plus the negative results and the driver-wedge ban that keep a production
+fleet stable. Full tables: research/v100/serving-optimization-2026-07/.
