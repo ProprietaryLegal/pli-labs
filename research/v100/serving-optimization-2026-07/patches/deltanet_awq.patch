@@ -1,0 +1,132 @@
+--- a/lmdeploy/turbomind/builders/deltanet.py
++++ b/lmdeploy/turbomind/builders/deltanet.py
+@@ -9,10 +9,113 @@
+ 
+ import torch
+ 
+-from ..linear import dequant_mixed, transform_output_dim
++from ..linear import Linear, dequant_mixed, transform_output_dim
+ from ._base import Builder, ParallelGroup, SplitSide
+ 
+ 
++# ---------------------------------------------------------------------------
++# Mixed-format fusion without dequantizing the big W4 projections
++# ---------------------------------------------------------------------------
++
++
++def _rtn_quant_to_awq(linear: Linear, fmt) -> Linear:
++    """Round-to-nearest quantize a trivial fp16/bf16 ``Linear`` into AWQ TM
++    layout so it can be fused with real AWQ linears.
++
++    Produces the exact tensor kinds ``AWQFormat.normalize`` yields:
++
++    - ``weight``: uint8 [K, N], unpacked u4 values 0..15
++    - ``scales``: fp16 [K/g, N]
++    - ``zeros``:  fp16 [K/g, N] (integer-valued zero points 0..15)
++
++    Dequant contract (``AWQFormat.dequant``): ``w = (q - zeros) * scales``.
++    Asymmetric per-group min/max RTN; groups run along the input dim
++    (axis 0), matching ``fmt.block_in``.  Bias (if any) passes through
++    unchanged, as in real AWQ bundles.
++    """
++    w = linear.tensors['weight']
++    g = fmt.block_in
++    k, n = w.shape
++    assert k % g == 0, (
++        f'_rtn_quant_to_awq: input dim {k} not divisible by group size {g}')
++    wf = w.float().unflatten(0, (k // g, g))          # [K/g, g, N]
++    wmax = wf.amax(dim=1)                             # [K/g, N]
++    wmin = wf.amin(dim=1)
++    rng = wmax - wmin
++    # Degenerate (constant-within-group) columns: use |c|/15 so the
++    # round-trip still reproduces c exactly (zp saturates to 0 or 15).
++    base = torch.where(rng > 0, rng, wmax.abs().clamp(min=1e-5)) / 15.0
++
++    # MSE-optimal range clipping (AutoAWQ-style): try shrunken ranges and
++    # keep, per group x column, the scale minimizing round-trip MSE.
++    # Cheap: only the tiny always-fp16 projections ever take this path.
++    scale = base
++    zp = torch.clamp(torch.round(-wmin / scale), 0.0, 15.0)
++    q = torch.clamp(torch.round(wf / scale.unsqueeze(1) + zp.unsqueeze(1)),
++                    0.0, 15.0)
++    best_err = ((q - zp.unsqueeze(1)) * scale.unsqueeze(1) - wf).pow(2).sum(dim=1)
++    for shrink in torch.linspace(0.70, 0.99, 30).tolist():
++        s = base * shrink
++        z_c = torch.clamp(torch.round(-wmin / s), 0.0, 15.0)
++        q_c = torch.clamp(torch.round(wf / s.unsqueeze(1) + z_c.unsqueeze(1)),
++                          0.0, 15.0)
++        err = ((q_c - z_c.unsqueeze(1)) * s.unsqueeze(1) - wf).pow(2).sum(dim=1)
++        better = err < best_err
++        best_err = torch.where(better, err, best_err)
++        scale = torch.where(better, s, scale)
++        zp = torch.where(better, z_c, zp)
++        q = torch.where(better.unsqueeze(1), q_c, q)
++    tensors = {
++        'weight': q.flatten(0, 1).to(torch.uint8),
++        'scales': scale.to(torch.float16),
++        'zeros':  zp.to(torch.float16),
++    }
++    if 'bias' in linear.tensors:
++        tensors['bias'] = linear.tensors['bias']
++    return Linear(tensors=tensors, weight_format=fmt)
++
++
++def requant_mixed(*linears: Linear | None, data_type) -> tuple[Linear | None, ...]:
++    """Bring mixed-format linears to a common format for fusion, keeping
++    W4 weights quantized whenever possible.
++
++    ``dequant_mixed`` (the previous behavior) resolves format mixes by
++    dequantizing *everything* to fp16.  For GDN layers of AWQ checkpoints
++    (e.g. Qwen3.5/3.6) that blows the large in_proj_qkv / in_proj_z
++    projections up 4x, because the tiny always-fp16 in_proj_b/in_proj_a
++    (hidden x num_v_heads) share the fusion group.
++
++    Here, when the group mixes exactly one AWQ format with trivial
++    linears, the trivial ones are RTN-quantized into that AWQ format
++    instead, so the fused ``in_proj_all`` stays UINT4 end to end.  Any
++    other mix falls back to ``dequant_mixed``.
++    """
++    from ..weight_format import AWQFormat, TrivialFormat
++
++    present = [l for l in linears if l is not None]
++    fmts = {l.weight_format for l in present}
++    if len(fmts) <= 1:
++        return linears
++
++    awq_fmts = {f for f in fmts if isinstance(f, AWQFormat)}
++    trivial_fmts = {f for f in fmts if isinstance(f, TrivialFormat)}
++    if len(awq_fmts) == 1 and len(awq_fmts) + len(trivial_fmts) == len(fmts):
++        fmt = next(iter(awq_fmts))
++        quantizable = all(
++            isinstance(l.weight_format, AWQFormat)
++            or ('weight' in l.tensors
++                and l.tensors['weight'].dim() == 2
++                and l.tensors['weight'].shape[0] % fmt.block_in == 0)
++            for l in present)
++        if quantizable:
++            return tuple(
++                l if l is None or isinstance(l.weight_format, AWQFormat)
++                else _rtn_quant_to_awq(l, fmt)
++                for l in linears)
++
++    return dequant_mixed(*linears, data_type=data_type)
++
++
+ def _split_qkv_tensor(t: torch.Tensor, num_k_heads: int,
+                       num_v_heads: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     """Split a tensor along its output dim into Q, K, V via block-level view.
+@@ -77,12 +180,12 @@
+                               in_proj_b=None, in_proj_a=None, out_proj=None):
+         """Fuse GDN input projections via pipeline, commit all linears.
+ 
+-        Pipeline: split_qkv -> dequant_mixed -> fuse_gdn -> commit.
++        Pipeline: split_qkv -> requant_mixed -> fuse_gdn -> commit.
+         """
+         q, k, v = split_qkv(in_proj_qkv,
+                             num_k_heads=self.config.num_k_heads,
+                             num_v_heads=self.config.num_v_heads)
+-        q, k, v, z, b, a = dequant_mixed(q, k, v, in_proj_z, in_proj_b, in_proj_a,
++        q, k, v, z, b, a = requant_mixed(q, k, v, in_proj_z, in_proj_b, in_proj_a,
+                                            data_type=self.config.data_type)
+         fused = fuse_gdn(q, k, v, z, b, a, tp=self.tp.size)
+         self._add_linear('in_proj_all', fused, SplitSide.OUTPUT)

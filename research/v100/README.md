@@ -9,6 +9,12 @@ private topology or operational runbooks.
 
 ## What Is Published Here
 
+- [serving-optimization-2026-07/README.md](serving-optimization-2026-07/README.md)
+  - **July 2026 serving-optimization sprint case study**: measured
+  before/after tables (36.7–61.7x prefix caching, 2.56x CUDA-graph decode,
+  OOM→served GDN-hybrid patch, ~10x per-GPU Gemma lane), context-depth data,
+  published negative results, and the TurboMind AWQ builder patch.
+
 - [MASTER-PLAN.md](MASTER-PLAN.md) - public action plan for V100-class serving.
 - [findings/current-stack.md](findings/current-stack.md) - public constraints
   for V100-class inference.
