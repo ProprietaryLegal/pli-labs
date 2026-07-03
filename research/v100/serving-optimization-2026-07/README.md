@@ -24,11 +24,14 @@ practice's drafting, review, extraction, and reasoning lanes.
 | Mixed-type KV-cache prefill (missing FA kernels) | 79–94 t/s | 154–161 t/s | **~2x cliff removed** |
 | Qwen3.6-27B (GDN hybrid) on one 32GB V100 | did not fit (OOM) | 27.8 t/s decode | **unservable → served** |
 | vLLM decode via CUDA graphs (sm_70) | 51.6 t/s eager | 132.8 t/s | **2.56x** |
-| Gemma-4 lane throughput per GPU (MoE swap) | 40 t/s on 4 GPUs (10 t/s/GPU) | 101.3 t/s on 1 GPU | **~10x per GPU** |
-| Qwen3.5-122B-A10B vs stock Ollama baseline | 38 t/s | 58.6–61.7 t/s | **1.6x** |
+| Gemma-4 lane throughput per GPU (lane redesign†) | 40 t/s on 4 GPUs (10 t/s/GPU) | 101.3 t/s on 1 GPU | **~10x per GPU†** |
+| Qwen3.5-122B-A10B vs stock Ollama baseline | 38 t/s | **61.8 t/s (3-run verified)** | **1.6x** |
 
 All decode figures are single-stream generation tokens/sec at the stated
-context unless noted. Aggregate-throughput and prefill figures are called out
+context unless noted. †The Gemma-lane figure compares different same-family
+checkpoints (dense 31B vs 26B-A4B MoE) — a deployment redesign, not a
+same-model speedup; throughput is measured on both sides, and the task-level
+quality-parity evaluation is still in progress. Aggregate-throughput and prefill figures are called out
 separately in each section.
 
 ---
@@ -151,7 +154,9 @@ kind of issue that quietly costs teams weeks.
 
 The biggest single win wasn't a kernel — it was recognizing that a
 same-family MoE checkpoint dominates the dense deployment for
-throughput-bound lanes:
+throughput-bound lanes. This is a lane redesign (different checkpoint),
+not a same-model optimization — quality gates passed spot checks and the
+full task-level evaluation is the promotion gate:
 
 | Gemma-4 lane option | Hardware | Generation | Prefill | Per-GPU |
 |---|---|---|---|---|
@@ -179,6 +184,24 @@ gate.
   driver** (D-state, reboot-only recovery, confirmed twice). Long-context
   work belongs in layer-split mode on this class of hardware. Bans like this
   belong in the serving policy, not in tribal memory.
+
+## Model-by-model before/after (verified rows marked)
+
+| Model | Metric | Before | After | Status |
+|---|---|---|---|---|
+| Gemma-4-31B dense | generation, 4-GPU board | 20.7 t/s (layer, safe mode) | 39.2 t/s (tensor, short-context) | **3-run verified both sides** |
+| Gemma-4-31B dense | prompt processing, repeated 6k/12k prefix | 42 s / 93 s | 1.1 s / 1.5 s | **measured A/B (36.7x / 61.7x)** |
+| Gemma-4-31B dense | mixed-KV prefill | 79.4 t/s | 161.3 t/s | **measured A/B (build flag)** |
+| Gemma-4-26B-A4B MoE | generation, single GPU | — (never deployed) | 101.3 t/s (93.4 @16k depth) | measured; quality eval pending |
+| Qwen3.5-122B MoE | generation, 4-GPU board | 38 t/s (stock) | **61.8 t/s** (plain build, f16 KV, layer) | **3-run verified** |
+| Qwen3.5-122B MoE | build-recipe A/B | 57.6 t/s (FORCE_MMQ + q8 KV) | 61.8 t/s (plain + f16) | **3-run verified — settles the recipe** |
+| Qwen3.6-27B hybrid | serve on one 32 GB V100 | out of memory (63/64 layers) | 27.8 t/s, coherent | **reproducible A/B (published patch)** |
+| Qwen3-4B (proof model) | vLLM decode, eager vs CUDA graphs | 51.6 t/s | 132.8 t/s | **measured A/B, bit-identical output** |
+| Qwen3.5-122B | vLLM TP4 + CUDA graphs | 77 t/s (historical TP2 anchor) | in measurement | running |
+
+One verification row (32k-token prefill) thermal-aborted at the fleet's 83 °C
+safety threshold and is pending a cooler window — published when it lands, like
+everything else here.
 
 ## Methodology
 
