@@ -1,0 +1,42 @@
+{
+ "baseline": "stock ollama (default model dir), spare port 11500, default settings, pinned Board B UUIDs via CUDA_VISIBLE_DEVICES",
+ "model": "qwen3.5:122b",
+ "prompt_chars": 492,
+ "runs": [
+  {
+   "run": 0,
+   "prompt_eval_count": 88,
+   "prompt_eval_duration_s": 0.513729615,
+   "eval_count": 128,
+   "eval_duration_s": 3.221941595,
+   "wall_s": 4.17,
+   "eval_rate_tps": 39.73,
+   "prompt_rate_tps": 171.3
+  },
+  {
+   "run": 1,
+   "prompt_eval_count": 88,
+   "prompt_eval_duration_s": 0.5037627,
+   "eval_count": 128,
+   "eval_duration_s": 3.207977072,
+   "wall_s": 4.06,
+   "eval_rate_tps": 39.9,
+   "prompt_rate_tps": 174.69
+  },
+  {
+   "run": 2,
+   "prompt_eval_count": 88,
+   "prompt_eval_duration_s": 0.495115815,
+   "eval_count": 128,
+   "eval_duration_s": 3.252393311,
+   "wall_s": 4.05,
+   "eval_rate_tps": 39.36,
+   "prompt_rate_tps": 177.74
+  }
+ ],
+ "load_run": {
+  "wall_s": 38.9,
+  "load_duration_s": 37.963513778
+ },
+ "eval_rate_median_tps": 39.73
+}

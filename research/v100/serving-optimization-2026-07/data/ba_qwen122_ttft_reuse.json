@@ -1,0 +1,42 @@
+{
+ "tag": "reuse",
+ "prefix_target_tokens": 6000,
+ "rows": [
+  {
+   "label": "reuse-cold-0",
+   "prompt_n": 6040,
+   "prompt_ms": 9594.214,
+   "predicted_n": 16,
+   "predicted_ms": 280.786,
+   "wall_ms": 9894.7,
+   "tokens_cached": 6055
+  },
+  {
+   "label": "reuse-warm-0",
+   "prompt_n": 510,
+   "prompt_ms": 1080.532,
+   "predicted_n": 16,
+   "predicted_ms": 276.568,
+   "wall_ms": 1377.2,
+   "tokens_cached": 6049
+  },
+  {
+   "label": "reuse-cold-1",
+   "prompt_n": 6040,
+   "prompt_ms": 9365.984,
+   "predicted_n": 16,
+   "predicted_ms": 274.781,
+   "wall_ms": 9883.6,
+   "tokens_cached": 6055
+  },
+  {
+   "label": "reuse-warm-1",
+   "prompt_n": 510,
+   "prompt_ms": 1072.638,
+   "predicted_n": 16,
+   "predicted_ms": 278.261,
+   "wall_ms": 1389.4,
+   "tokens_cached": 6049
+  }
+ ]
+}

@@ -10,10 +10,13 @@ private topology or operational runbooks.
 ## What Is Published Here
 
 - [serving-optimization-2026-07/README.md](serving-optimization-2026-07/README.md)
-  - **July 2026 serving-optimization sprint case study**: measured
-  before/after tables (36.7–61.7x prefix caching, 2.56x CUDA-graph decode,
-  OOM→served GDN-hybrid patch, ~10x per-GPU Gemma lane), context-depth data,
-  published negative results, and the TurboMind AWQ builder patch.
+  - **July 2026 serving-optimization sprint case study**: verified
+  model-by-model before/after matrix (122B MoE: measured 39.7 t/s stock
+  Ollama baseline → 61.8 t/s llama.cpp / 67.6 t/s vLLM), 36.7–86.6x
+  prefix-cache TTFT wins, 2.56–4.5x CUDA-graph decode on sm_70 (incl. the
+  first known TP4 graph capture), OOM→served GDN-hybrid patch, ~10x per-GPU
+  Gemma lane, KV-quant-at-depth guidance, and published negative results —
+  including an honest single-card dense regression from our own tuned build.
 
 - [MASTER-PLAN.md](MASTER-PLAN.md) - public action plan for V100-class serving.
 - [findings/current-stack.md](findings/current-stack.md) - public constraints
