@@ -209,7 +209,7 @@ gate.
 | Gemma-4-31B dense | generation, 4-GPU board | 20.7 t/s (layer, safe mode) | 39.2 t/s (tensor, short-context) | **3-run verified both sides** |
 | Gemma-4-31B dense | prompt processing, repeated 6k/12k prefix | 42 s / 93 s | 1.1 s / 1.5 s | **measured A/B (36.7x / 61.7x)** |
 | Gemma-4-31B dense | mixed-KV prefill | 79.4 t/s | 161.3 t/s | **measured A/B (build flag)** |
-| Gemma-4-26B-A4B MoE | generation, single GPU | — (never deployed) | 101.3 t/s (93.4 @16k depth) | measured; quality eval pending |
+| Gemma-4-26B-A4B MoE | generation, single GPU | — (never deployed) | 101.3 t/s (93.4 @16k depth) | **quality gate passed with routing caveats** (blind 10-task eval: citation parity with dense, 2.8x faster wall) |
 | Qwen3.5-122B MoE | generation, 4-GPU board | 38 t/s (stock) | **61.8 t/s** (plain build, f16 KV, layer) | **3-run verified** |
 | Qwen3.5-122B MoE | build-recipe A/B | 57.6 t/s (FORCE_MMQ + q8 KV) | 61.8 t/s (plain + f16) | **3-run verified — settles the recipe** |
 | Qwen3.6-27B hybrid | serve on one 32 GB V100 | out of memory (63/64 layers) | 27.8 t/s, coherent | **reproducible A/B (published patch)** |
