@@ -1,0 +1,92 @@
+[
+ {
+  "label": "p6k-cold-0",
+  "prompt_n": 6050,
+  "prompt_ms": 41830.841,
+  "predicted_n": 1,
+  "predicted_ms": 0.001,
+  "wall_ms": 41860.4,
+  "tokens_cached": 6050
+ },
+ {
+  "label": "p6k-warm-0",
+  "prompt_n": 11,
+  "prompt_ms": 1234.322,
+  "predicted_n": 16,
+  "predicted_ms": 3916.006,
+  "wall_ms": 5180.6,
+  "tokens_cached": 6059
+ },
+ {
+  "label": "p6k-cold-1",
+  "prompt_n": 6042,
+  "prompt_ms": 42145.336,
+  "predicted_n": 1,
+  "predicted_ms": 0.001,
+  "wall_ms": 42907.9,
+  "tokens_cached": 6050
+ },
+ {
+  "label": "p6k-warm-1",
+  "prompt_n": 11,
+  "prompt_ms": 1002.279,
+  "predicted_n": 16,
+  "predicted_ms": 3914.694,
+  "wall_ms": 4974.5,
+  "tokens_cached": 6059
+ },
+ {
+  "label": "p6k-cold-2",
+  "prompt_n": 6042,
+  "prompt_ms": 42167.013,
+  "predicted_n": 1,
+  "predicted_ms": 0.001,
+  "wall_ms": 42955.1,
+  "tokens_cached": 6050
+ },
+ {
+  "label": "p6k-warm-2",
+  "prompt_n": 11,
+  "prompt_ms": 1199.048,
+  "predicted_n": 16,
+  "predicted_ms": 3893.146,
+  "wall_ms": 5144.6,
+  "tokens_cached": 6059
+ },
+ {
+  "label": "p12k-cold-0",
+  "prompt_n": 12033,
+  "prompt_ms": 93154.817,
+  "predicted_n": 1,
+  "predicted_ms": 0.001,
+  "wall_ms": 93938.2,
+  "tokens_cached": 12037
+ },
+ {
+  "label": "p12k-warm-0",
+  "prompt_n": 11,
+  "prompt_ms": 1408.941,
+  "predicted_n": 16,
+  "predicted_ms": 5217.836,
+  "wall_ms": 6677.4,
+  "tokens_cached": 12046
+ },
+ {
+  "label": "p12k-cold-1",
+  "prompt_n": 12028,
+  "prompt_ms": 93081.792,
+  "predicted_n": 1,
+  "predicted_ms": 0.001,
+  "wall_ms": 94126.0,
+  "tokens_cached": 12037
+ },
+ {
+  "label": "p12k-warm-1",
+  "prompt_n": 11,
+  "prompt_ms": 1607.192,
+  "predicted_n": 16,
+  "predicted_ms": 5101.061,
+  "wall_ms": 6791.8,
+  "tokens_cached": 12046
+ }
+]

@@ -191,13 +191,44 @@ gate.
   thresholds during every GPU experiment.
 - Negative results recorded with the same provenance as wins.
 
-## Artifacts
+## Artifacts — download and run
 
-- [`patches/deltanet_awq.patch`](patches/deltanet_awq.patch) — the
-  LMDeploy/TurboMind GDN-hybrid AWQ builder fix (section 3).
-- Full raw benchmark JSON, thermal logs, and lane-by-lane engineering log
-  remain in the private campaign repository; sanitized conclusions are
-  published here per the [research/v100 privacy boundary](../README.md).
+**Patches**
+- [`patches/deltanet_awq.patch`](patches/deltanet_awq.patch) — the LMDeploy/TurboMind
+  GDN-hybrid AWQ builder fix (section 3). Apply to lmdeploy 0.14.0 site-packages.
+- [`patches/deltanet_verify_cpu.py`](patches/deltanet_verify_cpu.py) — rerunnable
+  CPU verifier: proves the checkpoint AWQ weights survive the patch bit-exactly.
+
+**Scripts (ready to run)**
+- [`scripts/build_llamacpp_sm70.sh`](scripts/build_llamacpp_sm70.sh) — the V100 build
+  recipe incl. `GGML_CUDA_FA_ALL_QUANTS=ON` (removes the section-2 cliff) and the
+  CMake 3.28 gotcha.
+- [`scripts/serve_gemma4_31b_prefix_cache.sh`](scripts/serve_gemma4_31b_prefix_cache.sh)
+  — the 36.7–61.7x prefix-cache serving recipe (`--cache-reuse 256 --swa-full`).
+- [`scripts/serve_gemma4_26b_a4b.sh`](scripts/serve_gemma4_26b_a4b.sh) — the 101 t/s
+  single-V100 Gemma-4 MoE lane.
+- [`scripts/serve_qwen36_27b_turbomind.sh`](scripts/serve_qwen36_27b_turbomind.sh)
+  — the patched single-V100 Qwen3.6-27B recipe with the memory floor documented.
+- [`scripts/thermal_guarded_bench.sh`](scripts/thermal_guarded_bench.sh) —
+  provenance-grade benching with a fail-loud thermal abort (how every number in
+  this study was collected).
+
+**Data (raw measurements, sanitized)**
+- [`data/kv_quant_fa_all_quants_build.json`](data/kv_quant_fa_all_quants_build.json) /
+  [`data/kv_quant_default_build.json`](data/kv_quant_default_build.json) — the full
+  16-combo KV-type matrix behind section 2 (llama-bench JSON, 3-run).
+- [`data/context_depth_curve_q8kv.json`](data/context_depth_curve_q8kv.json) — the
+  0→32k KV-depth curve.
+- [`data/gemma4_26b_a4b_fullfit_profile.json`](data/gemma4_26b_a4b_fullfit_profile.json)
+  — the single-card MoE profile behind section 5.
+- [`data/prefix_cache_reuse_raw.json`](data/prefix_cache_reuse_raw.json) +
+  [`data/lc_cache_reuse_v100.md`](data/lc_cache_reuse_v100.md) +
+  [`data/lc_cache_test.py`](data/lc_cache_test.py) — raw cold/warm timings, the
+  writeup, and the reusable measurement harness behind section 1.
+
+Thermal logs and the lane-by-lane engineering log remain in the private
+campaign repository; everything above is published per the
+[research/v100 privacy boundary](../README.md).
 
 ---
 
