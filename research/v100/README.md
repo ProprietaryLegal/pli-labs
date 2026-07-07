@@ -9,6 +9,14 @@ private topology or operational runbooks.
 
 ## What Is Published Here
 
+- [ds4-flash-volta-20260707.md](ds4-flash-volta-20260707.md)
+  - **DeepSeek-V4-Flash on Volta — full research notes**: first known
+  V4-Flash-on-V100 datapoint (12.2 t/s gen / 209 t/s prefill@8K on 8 cards),
+  the silent q8_0 K-cache corruption for MLA-576 with the controlled matrix
+  that pinned it, the published fail-loud guard (`ds4-volta-fix` branch),
+  failed kernel fixes as negative results, KV-cache guidance, the 8-GPU
+  peer-mapping ceiling, and full reproduction commands.
+
 - [serving-optimization-2026-07/README.md](serving-optimization-2026-07/README.md)
   - **July 2026 serving-optimization sprint case study**: verified
   model-by-model before/after matrix (122B MoE: measured 39.7 t/s stock
