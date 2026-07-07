@@ -149,3 +149,35 @@ output fail loudly.
 
 *PLI Labs — Proprietary Legal Intelligence, LLC. Nothing here is legal advice;
 these are research measurements toward lawyer-supervised, on-premises legal AI.*
+
+## 9. Root cause, final (2026-07-07 second investigation) — the sm_70 attribution was WRONG
+
+Section 6's "open suspects" resolved. A second lane cleared every GPU kernel
+(new `test-backend-ops` cases: FLASH_ATTN_EXT 56/56 and quantize-on-write
+SET_ROWS 2/2, CUDA-vs-CPU, at the exact 576/512 MLA shape with q8_0) and then
+ran the control the first investigation had missed: **CPU-only inference with
+a quantized K-cache — identical garbage.** The original "CPU coherent" control
+had silently used the default f16 K-cache. The defect is backend-independent.
+
+Mechanism (verified by discriminator): a quantized K/V cache enables the
+Hadamard incoherence rotation (`attn_rot_k/v`); allocating it diverts
+DeepSeek-V4 layers off their sparse CSA/HCA/lightning-indexer attention (which
+asserts the rotation is absent) into `build_raw_attention`, which applies the
+rotation with a plain `ggml_mul_mat` (not the block-reshaping
+`ggml_mul_mat_aux`) and never un-rotates the MLA V-is-a-view-of-K output
+before the `v_mla` up-projection. Disabling all rotations at runtime with
+q8_0-K → coherent, on CPU and GPU.
+
+Fix shipped (branch `ds4-volta-fix`, patches in `patches/`): disable the KV
+rotation for the deepseek4 architecture; quantized K then flows through the
+model's designed sparse attention as plain q8_0. Live 4-cell verification
+(`evidence/ds4fix-live-matrix-20260707.md`): all four K/V combinations
+coherent; f16 behavior byte-identical (rotation was never active there).
+Upstream issue with minimal repro and three fix options:
+https://github.com/ggml-org/llama.cpp/issues/25382. A rotation-aware rewrite
+of the sparse paths (the proper long-term fix) is in progress.
+
+Method lesson, twice earned in one day: a control is only a control if the
+variable you care about is actually held. "CPU is coherent" meant "CPU with
+f16-K is coherent" — the quantized-K CPU cell was never run, and its absence
+cost two failed kernel-fix attempts aimed at hardware that was never broken.
