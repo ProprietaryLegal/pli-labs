@@ -83,7 +83,10 @@ Working notes:
   `GGML_CUDA_NO_VMM=ON` build is under test as the workaround for 10- and
   12-card configurations; results will follow.
 
-## The bug: quantized K-cache silently corrupts DeepSeek MLA output on Volta
+## The bug: quantized K-cache silently corrupts DeepSeek MLA output — UPDATE: on every backend, not just Volta
+
+> **Update (later on 2026-07-07):** continued investigation disproved the sm_70 attribution below. The identical corruption reproduces on CPU-only inference; the true cause is llama.cpp's quantized-KV Hadamard rotation diverting DeepSeek-V4 off its sparse attention paths (graph-level, backend-independent). A verified fix and the full corrected analysis are published — see [ggml-org/llama.cpp#25382](https://github.com/ggml-org/llama.cpp/issues/25382) and [our research record](https://github.com/ProprietaryLegal/deepseek-v4-flash-v100). The operational guidance below (f16 K-cache) remains correct on unpatched builds.
+
 
 The first DeepSeek-V4-Flash runs loaded cleanly, computed at full speed on all
 eight GPUs, returned HTTP 200s and a green `/health` — and emitted confident
