@@ -140,3 +140,5 @@ ImportError. Check `find build -name "*.o" -size 0` after any interrupted vLLM b
   TurboMind (LMDeploy) lineage, flash-attention-v100, marlin_v100.
 - vLLM project for the Marlin kernel family.
 - PLI Labs V100 serving research (proprietarylegal.ai).
+
+**Upstream PR:** https://github.com/1CatAI/1Cat-vLLM/pull/100 (opened 2026-07-10; comments with validation evidence on issues #87 and #94).
