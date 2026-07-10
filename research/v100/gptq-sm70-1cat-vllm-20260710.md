@@ -1,9 +1,10 @@
 # Restoring GPTQ on Tesla V100 in 1Cat-vLLM — Root Cause and Fix (research note, 2026-07-10)
 
-> **Status: compile-verified, runtime-pending.** All V100 nodes were occupied by a
-> production run when this was written; kernel presence is proven by `cuobjdump`, not yet
-> by execution. Do not promote to the blog until the §7 runtime checklist passes on real
-> Volta hardware. Draft for the eventual post: "Restoring GPTQ on Tesla V100 in 1Cat-vLLM".
+> **Status: runtime-verified 2026-07-10** on a Tesla V100-SXM2-32GB (host gooch, TP1,
+> fp16, dedicated sm_70 wheel from `fix/gptq-sm70`, torch 2.10.0+cu128, py3.12). GPTQ
+> (`desc_act=false`) and compressed-tensors WNA16 (zero env flags) both serve with
+> coherent greedy output and sane logprobs — see §7 for the full matrix and the two scope
+> corrections (act-order and bias are rejected by the sm_70 host dispatch).
 
 [1Cat-vLLM](https://github.com/1CatAI/1Cat-vLLM) is the vLLM fork that keeps modern
 serving alive on Volta (sm_70): TurboMind-derived W4A16 kernels, a flash-attention-v100
@@ -20,7 +21,8 @@ broken by a packaging constraint and one Python capability gate.
 
 - `csrc/quantization/marlin/sm70_gptq_marlin_repack.cu` — GPTQ→Marlin weight repack for
   sm_70, 4-bit and 8-bit, including `has_perm=true` (act-order / `desc_act` / `g_idx`)
-  template variants — the classic GPTQ-vs-AWQ format delta is handled
+  template variants — though note (runtime finding, §7): the GEMM host dispatch
+  `TORCH_CHECK`-rejects act-order, so `desc_act=true` checkpoints still do not serve
 - `sm70_marlin_u4b8_gemm.cu`, `sm70_marlin_u8b128_gemm.cu` — GEMMs for the GPTQ scalar
   types (unsigned 4-bit with symmetric bias 8; 8-bit with bias 128)
 - `csrc/moe/marlin_moe_wna16/sm70_*.cu` — the MoE equivalents
@@ -102,14 +104,35 @@ On a dedicated sm_70 wheel built from current main (CUDA 12.6, torch 2.10.0+cu12
   official wheel serves Volta and Turing+ together. Proposed to the maintainer; mechanical
   but needs dual-arch runtime testing.
 
-## 7. Runtime verification checklist (before promoting this note to the blog)
+## 7. Runtime verification results (2026-07-10, gooch, Tesla V100-SXM2-32GB, GPU 0)
 
-1. 1× V100-SXM2-32GB, `fix/gptq-sm70` wheel, torch 2.10.0+cu128, py3.12.
-2. Small GPTQ-Int4 model with `desc_act=true` (exercises the perm path), TP1,
-   `--dtype float16`: engine starts, repack runs, generation coherent.
-3. compressed-tensors WNA16 checkpoint with **no** `VLLM_SM70_*` env vars (the commit-1
-   behavior), same checks.
-4. Logprob sanity vs the AWQ variant of the same model; decode t/s recorded.
+Fresh py3.12 venv, `torch==2.10.0+cu128`, wheel built from `fix/gptq-sm70` (`054e2fd2`)
+with `TORCH_CUDA_ARCH_LIST=7.0`; all runs TP1, `dtype=float16`, greedy, `logprobs=3`,
+`enforce_eager=True` (see caveat 3 below).
+
+| checkpoint | format | result |
+|---|---|---|
+| `TheBloke/Llama-2-7B-Chat-GPTQ` (4-bit g128, `desc_act=false`) | GPTQ | **PASS** — `Using MarlinLinearKernel for AutoGPTQLinearMethod`, repack runs (no kernel-image error), coherent greedy output ("The capital of France is" → "Paris, which is located in the northern part of the country."), chosen-token logprobs all finite in [-1.4, 0] |
+| `nm-testing/Meta-Llama-3-8B-Instruct-W4A16-compressed-tensors-test` (4-bit g128) | compressed-tensors | **PASS with zero `VLLM_SM70_*` env vars** — the commit-1 auto-detect behavior; `Using MarlinLinearKernel for CompressedTensorsWNA16`; coherent, sane logprobs; ~68 output tok/s aggregate batch-4 (8B, eager, shared host) |
+| `TheBloke/Mistral-7B-Instruct-v0.2-GPTQ` (`desc_act=true`) | GPTQ | clean rejection: `act_order is not supported for the SM70 Marlin path.` |
+| `Qwen/Qwen2.5-3B-Instruct-GPTQ-Int4` | GPTQ | clean rejection: `SM70 Marlin does not support bias. TODO: add epilogue bias fusion.` |
+
+Scope corrections found at runtime (pre-existing sm_70 port limitations, orthogonal to the
+patch — clean `TORCH_CHECK` errors, not crashes):
+
+1. **Act-order does not serve.** The `has_perm=true` repack cubins exist, but
+   `sm70_marlin_dispatch.cu` hard-rejects `has_act_order` before the GEMM. V100 GPTQ
+   support = `desc_act=false` checkpoints only. (§1 corrected accordingly.)
+2. **Bias epilogue unsupported** — Qwen-family checkpoints (QKV bias) cannot serve on the
+   sm_70 Marlin path; bias-free families (Llama, Mistral) work.
+3. **Default `VLLM_COMPILE` mode failed on this host** with a device-side assert in the
+   rotary-embedding gather during the profile run; `enforce_eager` works. Independent of
+   quantization; to be reproduced and filed separately.
+
+Also worth recording: the first wheel from the patched branch was silently defective — an
+interrupted compile left two 0-byte object files (`sm70_marlin_u4b8_gemm.cu.o`,
+`sm70_marlin_u8b128_gemm.cu.o`) which the relink accepted, producing an `undefined symbol`
+ImportError. Check `find build -name "*.o" -size 0` after any interrupted vLLM build.
 
 ## Credits
 
