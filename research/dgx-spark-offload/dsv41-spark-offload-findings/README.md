@@ -24,8 +24,8 @@ Medians from different runs were never subtracted from each other: histogram per
 - **The remaining cost is lost overlap.** The local drafter queues GPU work and returns, so the engine's CPU prepares the next
   step while drafting runs. The synchronous remote round makes rank 0's CPU wait for target verification, then the network,
   then the worker, before the model runner can return. That serializes CPU work that used to overlap.
-- **Async rounds give most of it back on GB10** (measured 2026-10-23): −0.9 to −3.9 % per round with one drafter card,
-  and −3.9 to −6.5 % with the two-card drafter, against synchronous rounds. Time to first token was at parity. Details in
+- **Async rounds give most of it back on GB10** (measured 2026-10-23): −1.0 to −4.0 % per round with one drafter card,
+  and −3.9 to −6.3 % with the two-card drafter, against synchronous rounds. Time to first token was at parity. Details in
   section 2.
 - **Other work on the host is not the cause.** We sampled the host passively during real worker steps:
   - The worker's connection thread spent 2.6 ms waiting for a CPU across 262 steps, about 0.010 ms per step.
