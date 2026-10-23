@@ -10,8 +10,9 @@ pair of RTX 3090s. Overview: [DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload](https
 - With the [async process proxy](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) it gives **−3.9 to
   −6.5 % per round** against the one-card synchronous production setup, with time to first token at parity.
 - The illegal-address crash an earlier review reported is root-caused and fixed (below).
-- Not yet the production default: the switch-over checks are running now.
-
+- Window 5 (2026-10-23) repeated the window-4 numbers on the reviewed code and passed the supervised fault drills.
+- Production uses async rounds with the one-card worker since 2026-10-23. Promoting the two-card worker waits until
+  development work on the second card allows.
 
 Hugging Face entry: https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink
 
@@ -56,6 +57,13 @@ production setup at the time):
 | 150K × 2, step (ms) | 41.5 / 42.2 | 40.7 / 41.4 (−1.9 %) | 39.6 / 39.8 (**−5.0 %**) |
 
 Worker step p50 2.55 ms, p99 3.47 ms, over 6,284 steps.
+
+**Window 5 (2026-10-23), same setup, reviewed code:**
+- **Step p50:** short 37.2–37.3, 32K 40.4–40.5, 3 × 32K 72.7–73.6 and 150K 39.4–39.9 ms, equal to window 4 within noise.
+- **New: 4 × 32K concurrent.** 51.7 tok/s overall, prefill included; about 119 tok/s combined decode (31.0 + 31.6 +
+  32.7 + 23.7); step p50 87–88 ms.
+- **Greedy outputs:** 6 / 6 fixed prompts identical between the one-card and two-card workers.
+- **Switching** from two cards to one card takes 12 s.
 
 **Per-card memory and power,** from 1 s samples (caps 325 W):
 
@@ -149,6 +157,7 @@ Run `stop_tp2.sh` and start the one-card unit. The engine reconnects within ~5 s
 - **Separate:** [remote Engram](https://huggingface.co/ProprietaryLegal/dsv41-remote-engram-rdma) ·
   [remote 3090 drafter + KV](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) ·
   [async host-flag hand-off](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) ·
+  [native 1017 drafter on SM86](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) ·
   [ofl transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) ·
   [bench + interference tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools)
 - **GitHub:** [ProprietaryLegal/pli-labs › research/dgx-spark-offload](https://github.com/ProprietaryLegal/pli-labs/tree/main/research/dgx-spark-offload)

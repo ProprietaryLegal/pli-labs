@@ -103,6 +103,7 @@ Stopping the host server while the serve is up makes every lookup fall back to l
   [findings](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings)
 - **Separate:** [remote 3090 drafter + KV](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) ·
   [two-card NVLink drafter](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) ·
+  [native 1017 drafter on SM86](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) ·
   [async host-flag hand-off](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) ·
   [ofl transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) ·
   [bench + interference tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools)

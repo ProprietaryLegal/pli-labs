@@ -9,8 +9,11 @@ documentation; it contains no model weights. The served model is the public
 - **4.6–6.6 % faster time-to-first-token on long prompts.**
 - **Long tasks finish 3.9 % sooner at 150K** than the stock two-Spark recipe.
 - With synchronous drafting rounds, the cost is 3–9 % single-stream decode speed.
-- **New (2026-10-23): the two-card drafter with async rounds measures 3.9–6.5 % faster per decode round than that
-  production setup on GB10**, with time to first token unchanged. It is being promoted now.
+- **New (2026-10-23):**
+  - The two-card drafter with async rounds measures **3.9–6.5 % faster per decode round** than that production setup on
+    GB10, with time to first token unchanged. Window 5 confirmed it and passed supervised fault drills.
+  - **Async rounds have been in production since 2026-10-23** with the one-card drafter. The two-card worker follows.
+  - Four 32K requests at once: about **119 tok/s combined decode** (51.7 tok/s overall, prefill included).
 
 The model stays on the Sparks. An x86 host contributes RAM, two RDMA links and RTX 3090s.
 
@@ -20,8 +23,9 @@ The model stays on the Sparks. An x86 host contributes RAM, two RDMA links and R
 |---|---|---|
 | [dsv41-remote-engram-rdma](https://huggingface.co/ProprietaryLegal/dsv41-remote-engram-rdma) | Engram tables (2 × ~101.5 GB) served from host RAM over RDMA; exact local fallback | proven, production |
 | [dsv41-remote-dspark-drafter-3090](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) | DSpark drafter on an RTX 3090 ("capacity" mode); freed Spark memory → KV | proven, production |
-| [dsv41-dspark-drafter-tp2-nvlink](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) | the drafter split over an NVLinked 3090 pair | proven in-engine; with async −3.9 to −6.5 %/round; crash root-caused and fixed; being promoted |
-| [dsv41-async-hostflag-handoff](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) | GB10 async deadlock finding + CUDA-free proxy hand-off | measured on GB10 (process proxy); hardened and independently reviewed; being promoted |
+| [dsv41-dspark-drafter-tp2-nvlink](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) | the drafter split over an NVLinked 3090 pair | proven in-engine; with async −3.9 to −6.5 %/round (windows 4 and 5); crash root-caused and fixed; production promotion follows |
+| [dsv41-async-hostflag-handoff](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) | GB10 async deadlock finding + CUDA-free proxy hand-off | measured on GB10; hardened, reviewed, fault-drilled; **in production** (one-card worker) since 2026-10-23 |
+| [dsv41-native-1017-drafter-sm86](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) | the official 1017 drafter weights (MXFP4/FP8) on an NVLinked 3090 pair, custom SM86 kernels | on the real pair 2–12 % faster drafter step than the EXL3 drafter, equal acceptance; **strict fidelity gate still fails (fix in progress)**; not serving |
 | [ofl-rdma-transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) | RDMA RC / TCP request-response transport into caller memory | proven, production |
 | [dsv41-longctx-bench-tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools) | long-context suite, direct per-step timer, link-load and drill tools | proven |
 | [dsv41-spark-offload-findings](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings) | round-trip analysis, deadlocks, interference, exactness methodology, what didn't help | combined findings |
@@ -35,6 +39,7 @@ GitHub mirror: [ProprietaryLegal/pli-labs › research/dgx-spark-offload](https:
 | [`dsv41-remote-engram-rdma/`](dsv41-remote-engram-rdma/) | [HF](https://huggingface.co/ProprietaryLegal/dsv41-remote-engram-rdma) |
 | [`dsv41-remote-dspark-drafter-3090/`](dsv41-remote-dspark-drafter-3090/) | [HF](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) |
 | [`dsv41-dspark-drafter-tp2-nvlink/`](dsv41-dspark-drafter-tp2-nvlink/) | [HF](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) |
+| [`dsv41-native-1017-drafter-sm86/`](dsv41-native-1017-drafter-sm86/) | [HF](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) |
 | [`dsv41-async-hostflag-handoff/`](dsv41-async-hostflag-handoff/) | [HF](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) |
 | [`ofl-rdma-transport/`](ofl-rdma-transport/) | [HF](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) |
 | [`dsv41-longctx-bench-tools/`](dsv41-longctx-bench-tools/) | [HF](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools) |
@@ -111,6 +116,7 @@ setup at the time.
 | 150K × 2, step (ms) | 41.5 / 42.2 | 39.6 / 39.8 | −5.0 % |
 | 32K / 150K TTFT | 14.56–14.59 s / 69.10–69.11 s | 14.49–14.63 s / 68.89–69.09 s | parity |
 | drafter cards, serving memory | 1 × ~8.1 GiB | 5,862 + 5,222 MiB | |
+| 4 × 32K at once (window 5) | — | 51.7 tok/s overall; ~119 tok/s combined decode; step p50 87–88 ms | |
 
 Speed in tokens per second also depends on how many drafts each run happens to accept at T = 1 (±5 % between repeats), so
 we compare time per round. In the same runs, stream speed was 57.6 → 62.2 tok/s at 32K and 51.0 → 54.4 tok/s at 150K (means
@@ -132,11 +138,17 @@ that combination is untested.
 
 ## Limits and open items
 
-- Single-stream decode is 3–9 % slower with synchronous remote rounds on GB10. The async hand-off with the two-card worker
-  wins back 3.9–6.5 % per round, and is being promoted.
+- Single-stream decode is 3–9 % slower with synchronous remote rounds on GB10. Async rounds are now in production with
+  the one-card worker. The two-card worker adds the rest of the 3.9–6.5 % per round once it is promoted.
 - In progress, not yet proven on GB10:
   - KV page packing (upstream HeNryous 0057/0060; offline allocator figures: 1,604,926 → 2,502,600 tokens at 6 GiB/rank);
-  - 1M-token context.
+  - 1M-token context;
+  - **prefix storage across restarts** (an overlay of upstream HeNryous patches 0056/0058/0077/0081, plus a host-RAM
+    tier on the x86 host): code written and CPU-tested, under independent review, not yet run on GB10;
+  - **prefill ordering for mixed long requests** (first-come-first-served with a decode cap and background-priority
+    protection): the CPU model predicts the first answer of four concurrent 300K requests at about 156 s instead of 620 s.
+    That is a model result, not a measurement;
+  - the native drafter's fidelity fix.
 - One host is a shared dependency. If it fails, the Sparks keep serving: Engram falls back to NVMe, and decode runs without
   speculation.
 
