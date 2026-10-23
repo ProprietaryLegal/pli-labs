@@ -11,8 +11,8 @@ deployment on two DGX Spark (GB10) nodes with an x86 offload host. Overview:
 - **Hardened and independently reviewed.** Five defects found in review are fixed, each with a test that fails on the old
   code: late-proxy draft corruption, start failure, stall detection, respawn and shutdown. The reviewer re-ran every probe
   and cleared the runtime code for GB10.
-- **Not yet the production default.** The production switch-over checks are running now.
-
+- **In production since 2026-10-23** with the one-card drafter worker. Before the switch it passed supervised fault drills
+  on GB10 (below). The two-card worker follows.
 
 Hugging Face entry: https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff
 
@@ -92,6 +92,15 @@ The one-card async 32K TTFT excludes the first request after a fresh start (15.6
 - the first request after a fresh start pays lazy module loading (0.55 s short, about 1 s extra at 32K). A one-request
   warm-up at serve start absorbs it.
 
+**Window 5 (2026-10-23), on the reviewed code:** the same benchmark set repeated window 4 within noise. Step p50 was:
+- short 37.2–37.3 ms;
+- 32K 40.4–40.5 ms;
+- 3 × 32K 72.7–73.6 ms;
+- 150K 39.4–39.9 ms.
+
+Acceptance was at parity. Greedy outputs on 6 fixed prompts were identical between one-card and two-card async (drafts
+never change outputs).
+
 **Spin and nap are equal** (a spinning variant measured within noise of the napping one at every workload), so the cost
 came from running the round inside the engine process, not from the spin. The nap variant frees a core.
 
@@ -116,6 +125,23 @@ network time are unchanged within run-to-run noise.
   - two more kill soaks: 5,608 and 5,307 drafts exact, 0 wrong.
 - CPU suite: 222 passed, 1 skipped (196 / 1 before).
 - Its remaining notes concern the production runbook (GPU ownership after promotion, check ordering), not the runtime.
+
+## Supervised fault drills on GB10 (window 5)
+
+Both drills ran during live generations with the two-card worker:
+
+| drill | what happened | result |
+|---|---|---|
+| `kill -9` of the proxy, 3 concurrent requests | loss detected after about 1 s (process exit); new proxy running about 2 s later (respawn 1) | 3 / 3 requests completed; the drafter worker kept its process and took a new session |
+| `SIGSTOP` of the new proxy, 2 concurrent requests | lost by heartbeat: 531 ms old against the 400 ms limit; the engine killed the stopped process and respawned about 2 s later (respawn 2) | 2 / 2 completed; no stopped or zombie processes left; the engine's shared-memory descriptors unchanged (2) |
+| 10 minutes idle, then a request | no false loss (the heartbeat rule only judges while the engine thread runs) | pass |
+
+After both drills:
+- the stats showed generation 2 with 1 respawn left;
+- there were 3 watchdog fires and 66 target-only rounds, all during the outages;
+- the proxy's CPU affinity covered every core.
+
+Switching the drafter from the two-card to the one-card worker took 12 s, with the serve decoding target-only in between.
 
 ## When to use it, and when not
 
@@ -148,6 +174,7 @@ Design notes: `code/dspark/spark/ORDERING.md` (word protocol, races, respawn) an
 - **Separate:** [remote Engram](https://huggingface.co/ProprietaryLegal/dsv41-remote-engram-rdma) ·
   [remote 3090 drafter + KV](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) ·
   [two-card NVLink drafter](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) ·
+  [native 1017 drafter on SM86](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) ·
   [ofl transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) ·
   [bench + interference tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools)
 - **GitHub:** [ProprietaryLegal/pli-labs › research/dgx-spark-offload](https://github.com/ProprietaryLegal/pli-labs/tree/main/research/dgx-spark-offload)

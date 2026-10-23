@@ -5,7 +5,6 @@
 Each optimization has its own entry, linked at the bottom. Labels used throughout: **measured** = our runs; **upstream** =
 reported by the original authors; **estimate** = engineering arithmetic.
 
-
 Hugging Face entry: https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings
 
 ## 1. The remote drafter's round cost: lost overlap, not the link
@@ -98,6 +97,16 @@ We stopped the drafter worker 25 s into a 6,000-token request and started it aga
 
 Reconnection came 20 s after the worker was ready, because the backoff doubles up to 30 s. We cap it at 5 s in production.
 
+**Async proxy drills on GB10 (2026-10-23, two-card worker, live generations):**
+- `kill -9` of the proxy: lost after about 1 s, respawned about 2 s later, 3 / 3 requests completed. The drafter worker
+  kept its process and took a new session.
+- `SIGSTOP`: lost by heartbeat (531 ms against the 400 ms limit), respawned about 2 s later, 2 / 2 completed, no stopped or
+  zombie processes left.
+- Ten idle minutes produced no false loss.
+- Switching the drafter from two cards to one took 12 s.
+
+Details: [async entry](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff).
+
 ## 5. Exactness and nondeterminism methodology
 
 - **The engine isn't run-to-run deterministic at long context, even against itself.** With greedy decoding, thinking off and
@@ -179,6 +188,15 @@ exact replay showed the true ceiling is far higher.
 
 ## 9. In progress (not proven on GB10)
 
+- **The native 1017 drafter** ([entry](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86)) is fast on
+  the real NVLink pair, with acceptance equal to our deployed drafter. Its strict fidelity gate still fails, traced so far
+  to single-pass vs online-64 attention, and the fix is in progress.
+- **Prefix storage across restarts.** Our overlay of upstream HeNryous 0056/0058/0077/0081 plus a host-RAM tier. Upstream
+  reports a 75K-token prefix restored after a restart in 1.3–2.1 s against 33.8 s; that is their claim, not our
+  measurement. Our code is CPU-tested and under independent review.
+- **Prefill ordering for mixed long requests.** A CPU model predicts the first answer of four concurrent 300K requests at
+  about 156 s instead of 620 s, with total times within 3 %. That is a model result, not measured.
+
 - **KV page packing** (upstream HeNryous 0051→0060). Our offline run of the engine's own allocator code reproduces upstream's
   figures exactly and predicts 1,604,926 → 2,502,600 tokens at 6 GiB/rank (3,154,934 at a 1M cap). It is reviewed, and its
   GB10 run is next.
@@ -191,6 +209,7 @@ exact replay showed the true ceiling is far higher.
 - **Separate:** [remote Engram](https://huggingface.co/ProprietaryLegal/dsv41-remote-engram-rdma) ·
   [remote 3090 drafter + KV](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) ·
   [two-card NVLink drafter](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) ·
+  [native 1017 drafter on SM86](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) ·
   [async host-flag hand-off](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) ·
   [ofl transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) ·
   [bench + interference tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools)

@@ -126,6 +126,7 @@ unchanged. Only the drafter loses its remote path; remote Engram is independent.
   [findings](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings)
 - **Separate:** [remote Engram](https://huggingface.co/ProprietaryLegal/dsv41-remote-engram-rdma) ·
   [two-card NVLink drafter](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) ·
+  [native 1017 drafter on SM86](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) ·
   [async host-flag hand-off](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) ·
   [ofl transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) ·
   [bench + interference tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools)
