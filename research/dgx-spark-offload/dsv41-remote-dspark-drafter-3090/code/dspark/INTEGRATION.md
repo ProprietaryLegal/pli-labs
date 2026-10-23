@@ -108,7 +108,7 @@ is connected; the engine would recover by itself (NO_SESSION → HELLO → resyn
 | 2 | `C-shadow-remote.env` | acceptance with remote proposals (local still compared) | `vllm:spec_decode_num_accepted_tokens_total / num_drafts_total` within noise of A on the same prompts |
 | 3 | timing inputs | read `latency.local_propose_us` and `latency.rank0_round_us` from the shadow stats | replace the PLACEHOLDER `REMOTE_ROUND_MS` / `REMOTE_DRAFT_MS` in C-capacity / C-resilience (§4) |
 | 4 | `C-capacity.env` | the capacity mode: no local drafter | starts; reclaimed memory measured (§5); outputs sane; speed vs A (bench2) |
-| 4b | `C-capacity-async-cal1.env` (lane A2's hand-off; drop `CUDA_MODULE_LOADING=EAGER`, which A2 makes unnecessary) | same, with async rounds (the CPU never blocks; the engine stream waits on a host word the proxy thread writes with no CUDA call) | log `remote DSpark async mode on (host-flag hand-off self-test passed; …)`; stats `async: true`, `async_handoff`; speed vs step 4. Deploy `libdsv41_hostflag.so` next to `libofl.so` (§1.3) or let rank 0 compile `hostflag.c` at startup |
+| 4b | `C-capacity-async-cal1.env` (lane A2's hand-off; `CUDA_MODULE_LOADING=EAGER` stays: the proxy needs the GIL, and pybind11 extension launches hold it — S9 P1) | same, with async rounds (the CPU never blocks; the engine stream waits on a host word the proxy thread writes with no CUDA call) | log `remote DSpark async mode on (host-flag hand-off self-test passed; …)`; stats `async: true`, `async_handoff`; speed vs step 4. Deploy `libdsv41_hostflag.so` next to `libofl.so` (§1.3) or let rank 0 compile `hostflag.c` at startup |
 | 4c | `A-local.env` vs `C-capacity.env` (then `C-capacity-nodrop.env` if needed) | prefix-cache hits without the drafter's KV layers (§5, "KV group annotation") | the second request of a repeated ≥ 32K prompt has the same `cached_tokens` as under A |
 | 5 | `C-capacity(-async).env` with `KV_BYTES_OVERRIDE` | re-sized KV after step 4's measurement | larger `GPU KV cache size` / `Maximum concurrency` in the log; the 256K/300K runs of plan §4.5 |
 | 6 | `C-resilience.env` | per-round fallback | stop the worker mid-run → `local_fallback_rounds` grows, outputs continue; restart it → remote resumes (`resync_rounds`) |
@@ -310,30 +310,43 @@ Also note:
   and the worker, so the next step's CPU preparation is no longer overlapped with GPU work, as it is with the local
   drafter. That is a fixed per-step cost of ≈ 0.5–2 ms on top of the drafter time.
   - In shadow it is visible as `rank0_round_us` minus `rtt_us`.
-  - Async rounds (`VLLM_DSPARK_REMOTE_ASYNC=1`, capacity only) remove it. Lane A2 design
-    (`remote_dspark/streamsync.py`, `hostflag.c`): two 32-bit words in registered, device-mapped host memory. The
-    engine stream writes `gathered = t` after the gather's copies (`cuStreamWriteValue32`, fenced) and waits for
-    `released >= t` (`cuStreamWaitValue32`) before the reply's H2D copy and the TP broadcast. The proxy thread
-    acquire-spins on `gathered`, runs the round on the CPU and the network, writes the reply into pinned host
-    memory and release-stores `released`. It makes **no CUDA or torch call**: the first async design (side-stream
-    H2D + device flag written by the proxy thread) deadlocked on GB10 against a Triton module load on the engine
-    thread while the stream was parked (`offload/results/C/lazy-repro/RESULT.md`); a host word is released by a CPU
-    store, which needs no CUDA lock. The engine's Engram spin reader uses the same handshake on GB10.
+  - Async rounds (`VLLM_DSPARK_REMOTE_ASYNC=1`, capacity only) remove it. Lane A2 design, v2 after review S9
+    (`remote_dspark/streamsync.py`, `hostflag.c`): one C-owned page of registered, device-mapped host memory holds
+    three 32-bit words (`gathered`, `released`, `claimed`) and the reply. The engine stream writes `gathered = t`
+    after the gather's copies (`cuStreamWriteValue32`, fenced), waits for `released >= t` (`cuStreamWaitValue32`),
+    then copies the reply from the page (`cuMemcpyHtoDAsync`) and broadcasts it. The proxy thread acquire-spins on
+    `gathered`, runs the round on the CPU and the network, builds the reply in a private buffer and publishes it in
+    one GIL-free C call: claim `t`, copy the reply into the page, release `t` (monotonic). It makes **no CUDA or torch
+    call**: the first async design (side-stream H2D + device flag written by the proxy thread) deadlocked on GB10
+    against a Triton module load on the engine thread while the stream was parked
+    (`offload/results/C/lazy-repro/RESULT.md`); a host word is released by a CPU store, which needs no CUDA lock. The
+    engine's Engram spin reader uses the same handshake on GB10.
+  - A native watchdog thread (C: no Python, no CUDA) fails and releases a round that was gathered but not released
+    within the deadline; the claim word makes it and the proxy's publish mutually exclusive per round. Releases never
+    move backwards (cyclic max), so a late proxy cannot undo a later release (S9 F3). If the proxy thread ends for any
+    reason other than close(), every pending and later round is failed and released at once (far-ahead claim) and
+    later rounds skip the hand-off (zero drafts) (S9 F2). close() fails everything still pending the same way and
+    logs an error if the thread did not stop within 5 s.
   - Resync rows in async mode come from ring windows the engine stream copies to pinned host memory on request:
     the first round that needs a resync asks for them and fails (zero drafts), the next one is exact.
     `fallback_resync_pending` counts those rounds (one per failure/reconnect event; two if the engine had already
     submitted the next round).
-  - The C helper `libdsv41_hostflag.so` (CPU side: acquire wait with GIL released, release store). Build it next to
-    `libofl.so`: `cc -O2 -Wall -shared -fPIC -o ~/dsv41-offload-run/ofl/libdsv41_hostflag.so
-    ~/dsv41-deploy-offload/offload/dspark/spark/remote_dspark/hostflag.c` (and copy to spark-b's same directory), or
-    leave it out and rank 0 compiles the overlay's `hostflag.c` with `cc` into a private temp directory at startup
-    (`async_handoff.lib` says which). No C compiler and no library: async is refused with a warning (synchronous
-    rounds). `VLLM_DSPARK_REMOTE_HOSTFLAG_LIB` names an explicit path.
+  - The C helper `libdsv41_hostflag.so` (v2: page allocation + mlock, acquire wait with GIL released, monotonic
+    release, claim, publish, fail-release, watchdog). Production staging (`spark/stage_overlay.sh`, S9 F8) copies a
+    pinned aarch64 build next to `libofl.so` and refuses when async is configured and the build is missing or not the
+    pinned one (the pins: source `HOSTFLAG_C_SHA`, build `HOSTFLAG_SO_SHA`, set after building on the head node:
+    `cc -O2 -Wall -shared -fPIC -o ~/dsv41-offload-run/ofl/libdsv41_hostflag.so
+    offload/dspark/spark/remote_dspark/hostflag.c -lpthread`). Experiments may leave it out: rank 0 then compiles
+    the overlay's `hostflag.c` with `cc` into a private temp directory at startup (`async_handoff.lib` says which).
+    No C compiler and no library: async is refused with a warning (synchronous rounds).
+    `VLLM_DSPARK_REMOTE_HOSTFLAG_LIB` names an explicit path. A v1 library is refused (version check).
   - The proxy thread spins on one rank-0 core while a round is pending (as `cudaEventSynchronize` did);
     `VLLM_DSPARK_REMOTE_ASYNC_NAP_US` > 0 sleeps between checks after `VLLM_DSPARK_REMOTE_ASYNC_SPIN_US`.
   - Startup self-test (`HostFlagSync.self_test`): the CPU sees the copied data with `gathered`; the stream does not
-    pass the wait before the release and its copy after the wait reads the bytes written before it. The test can
-    never leave the stream parked (its rescue is a CPU store). On failure the mode turns off with the reason.
+    pass the wait before the publish, and its reply copy after the wait reads the bytes the publish wrote (the
+    production path). Its rescue is a CPU store; on failure the mode turns off with the reason. If the stream still
+    does not drain after the rescue (a device that never observes host stores) it raises `StreamStuckError`, which
+    stops startup instead of falling back to a stream that is parked for good (S9 F4).
   - Tested (lane A2, 2026-10-23): CPU suites (a profiler test fails on any torch call from the proxy thread), and on
     an RTX 3090 the GPU harness `tests_gpu/gpu_async_harness.py` with the reference worker on localhost: the first
     design deadlocked on a fresh `cuModuleLoadData` during a parked round (killed at 90 s); this one completed 30/30
@@ -342,7 +355,15 @@ Also note:
     9,319 failed rows zero, 73 resyncs from staged windows (124 `resync_pending` rounds), proxy round p50 664 µs
     vs 861 µs for the first design without module loads. Evidence: `$CAMPAIGN_LOGS_ROOT/DSV41-OFFLOAD/A2-evidence/`.
     GB10 is first run by the coordinator.
-  - `CUDA_MODULE_LOADING=EAGER` (added to the async configs for the first design) is not needed by this one.
+  - `CUDA_MODULE_LOADING=EAGER` stays in the async configs (S9 F1). The proxy needs the GIL, and pybind11 extension
+    launches (every `vllm_exl3_moe` extension: plain `m.def`, no `gil_scoped_release`) hold it; under lazy loading
+    such a launch waits for the parked stream while holding the GIL (S9 P1). EAGER moves those loads to startup.
+  - The native watchdog (hostflag v2, S9 F2/F5) is the backstop for what EAGER cannot cover (an extension first
+    imported while serving, a GC finalizer on the proxy thread making a CUDA call, proxy death, interpreter exit): a
+    round the stream gathered but nobody released within `VLLM_DSPARK_REMOTE_ASYNC_WATCHDOG_MS` (auto
+    `max(4 x TIMEOUT_MS, 200)`) is failed (zero drafts) and released from C, with no Python and no CUDA. Counters:
+    `async_watchdog.fires`, `watchdog_preempted` (the proxy found its round already failed), `fallback_proxy_dead` /
+    `async_dead` (the proxy thread ended: every later round is target-only, no hand-off).
   - The proxy thread shares the GIL with the engine thread, so async mode lowers the interpreter switch interval to
     500 µs (`VLLM_DSPARK_REMOTE_SWITCH_INTERVAL_US`) to bound the waits.
 - **No local timing claims.** The overlay ran only offline (CPU, the controller host). Every number on GB10 comes from the

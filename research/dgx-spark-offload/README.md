@@ -8,7 +8,9 @@ documentation; it contains no model weights. The served model is the public
 - **62 % more KV cache.** It now holds four 300K-token requests at once, which the stock setup can't fit.
 - **4.6–6.6 % faster time-to-first-token on long prompts.**
 - **Long tasks finish 3.9 % sooner at 150K** than the stock two-Spark recipe.
-- The cost is 3–9 % single-stream decode speed.
+- With synchronous drafting rounds, the cost is 3–9 % single-stream decode speed.
+- **New (2026-10-23): the two-card drafter with async rounds measures 3.9–6.5 % faster per decode round than that
+  production setup on GB10**, with time to first token unchanged. It is being promoted now.
 
 The model stays on the Sparks. An x86 host contributes RAM, two RDMA links and RTX 3090s.
 
@@ -18,8 +20,8 @@ The model stays on the Sparks. An x86 host contributes RAM, two RDMA links and R
 |---|---|---|
 | [dsv41-remote-engram-rdma](https://huggingface.co/ProprietaryLegal/dsv41-remote-engram-rdma) | Engram tables (2 × ~101.5 GB) served from host RAM over RDMA; exact local fallback | proven, production |
 | [dsv41-remote-dspark-drafter-3090](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) | DSpark drafter on an RTX 3090 ("capacity" mode); freed Spark memory → KV | proven, production |
-| [dsv41-dspark-drafter-tp2-nvlink](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) | the drafter split over an NVLinked 3090 pair | proven in-engine (−2.5 %/round), under review |
-| [dsv41-async-hostflag-handoff](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) | GB10 async deadlock finding + CUDA-free proxy hand-off | proven on 3090; GB10 speed pending |
+| [dsv41-dspark-drafter-tp2-nvlink](https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink) | the drafter split over an NVLinked 3090 pair | proven in-engine; with async −3.9 to −6.5 %/round; crash root-caused and fixed; being promoted |
+| [dsv41-async-hostflag-handoff](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) | GB10 async deadlock finding + CUDA-free proxy hand-off | measured on GB10 (process proxy); hardened and independently reviewed; being promoted |
 | [ofl-rdma-transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport) | RDMA RC / TCP request-response transport into caller memory | proven, production |
 | [dsv41-longctx-bench-tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools) | long-context suite, direct per-step timer, link-load and drill tools | proven |
 | [dsv41-spark-offload-findings](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings) | round-trip analysis, deadlocks, interference, exactness methodology, what didn't help | combined findings |
@@ -90,8 +92,29 @@ The production settings, sanitized, are in `config/production-D.env.example`.
 - **Remote Engram (B):** −5.4 % (32K) and −5.7 % (150K) TTFT, decode level, byte-exact.
 - **Remote drafter (C):** frees ~2.5 GiB of model load per rank and ~3–5 GiB of available memory; +7–9 % per decode round at
   one stream, ≤ 2 % under concurrency; acceptance unchanged.
-- **Two-card drafter (E):** −2.5 % per round versus one card, in-engine.
-- **Async hand-off:** GB10 measurement pending.
+- **Two-card drafter (E):** −0.6 to −2.6 % per round versus one card, in-engine, synchronous.
+- **Async hand-off, process proxy:**
+  - one card: −0.9 to −3.9 % per round;
+  - two cards: **−3.9 to −6.5 %**;
+  - time to first token at parity, 0 watchdog fires.
+
+### Window 4 (2026-10-23): two-card drafter + async rounds on GB10
+
+Direct per-step timer, p50 per request, 1,500-token budgets, T = 1; the baseline is the one-card synchronous production
+setup at the time.
+
+| workload | production (one card, sync) | two cards + async process proxy | change |
+|---|---|---|---|
+| short × 3, step (ms) | 39.6 / 40.1 / 39.4 | 37.1 / 37.4 / 36.9 | −6.5 % |
+| 32K × 3, step (ms) | 41.2 / 42.2 / 42.3 | 39.6 / 39.5 / 40.2 | −4.5 % |
+| 32K, 3 concurrent, step (ms) | 75.9 / 76.1 / 76.1 | 72.8 / 73.5 / 73.0 | −3.9 % |
+| 150K × 2, step (ms) | 41.5 / 42.2 | 39.6 / 39.8 | −5.0 % |
+| 32K / 150K TTFT | 14.56–14.59 s / 69.10–69.11 s | 14.49–14.63 s / 68.89–69.09 s | parity |
+| drafter cards, serving memory | 1 × ~8.1 GiB | 5,862 + 5,222 MiB | |
+
+Speed in tokens per second also depends on how many drafts each run happens to accept at T = 1 (±5 % between repeats), so
+we compare time per round. In the same runs, stream speed was 57.6 → 62.2 tok/s at 32K and 51.0 → 54.4 tok/s at 150K (means
+of 3 and 2 runs).
 
 ## Deploy and roll back
 
@@ -102,18 +125,18 @@ Each optimization has its own switch and its own fallback (see its entry):
 | remote Engram | unset `VLLM_ENGRAM_REMOTE*` and the overlay env | the image's NVMe reader |
 | remote drafter | unset `VLLM_DSPARK_REMOTE*`, remove the overlay mounts, KV back to 3.75 GiB | the image's local drafter |
 | two-card drafter | swap the worker unit back | the one-card worker; the engine reconnects in ~5 s |
+| async rounds | unset `VLLM_DSPARK_REMOTE_ASYNC` and restart the serve | synchronous rounds |
 
 The serve script refuses a half-enabled drafter configuration, and refuses a raised KV pool while the drafter is local, since
 that combination is untested.
 
 ## Limits and open items
 
-- Single-stream decode is 3–9 % slower with synchronous remote rounds on GB10. The async hand-off and the two-card worker
-  target this.
+- Single-stream decode is 3–9 % slower with synchronous remote rounds on GB10. The async hand-off with the two-card worker
+  wins back 3.9–6.5 % per round, and is being promoted.
 - In progress, not yet proven on GB10:
   - KV page packing (upstream HeNryous 0057/0060; offline allocator figures: 1,604,926 → 2,502,600 tokens at 6 GiB/rank);
-  - 1M-token context;
-  - async speed.
+  - 1M-token context.
 - One host is a shared dependency. If it fails, the Sparks keep serving: Engram falls back to NVMe, and decode runs without
   speculation.
 

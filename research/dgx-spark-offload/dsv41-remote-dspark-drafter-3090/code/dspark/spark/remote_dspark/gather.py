@@ -16,43 +16,15 @@ used.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 import torch
 
 from . import wire
+from .roundcore import BatchView, GatherResult, collect_meta  # noqa: F401 -- torch-free (process proxy)
 
 import logging
 
 log = logging.getLogger("vllm.remote_dspark")
-
-
-@dataclass
-class BatchView:
-    """CPU-side facts of a batch, from InputBatch (batch order)."""
-    req_ids: list[str]
-    slots: np.ndarray       # [n] request-state index (idx_mapping_np)
-    qsl: np.ndarray         # [n+1] query_start_loc_np
-    need_draft: np.ndarray  # [n] bool
-    k_window: np.ndarray    # [n] drafts verified this step (0 for prefill)
-
-    @property
-    def n(self) -> int:
-        return len(self.req_ids)
-
-
-@dataclass
-class GatherResult:
-    valid: np.ndarray       # [n] valid rows per request (rows sent)
-    first_pos: np.ndarray   # [n] position of the first candidate (= first valid) row
-    anchor: np.ndarray      # [n] anchor token
-    sampled: np.ndarray     # [n] bool: num_sampled > 0
-    n_candidates: int
-
-    @property
-    def n_valid(self) -> int:
-        return int(self.valid.sum())
 
 
 def batch_view_from_input_batch(input_batch, max_model_len: int | None = None) -> BatchView:
@@ -71,10 +43,21 @@ def batch_view_from_input_batch(input_batch, max_model_len: int | None = None) -
                      qsl=qsl, need_draft=need, k_window=k_window)
 
 
+def _copy_non_blocking(dst: torch.Tensor, src: torch.Tensor) -> None:
+    dst.copy_(src, non_blocking=True)
+
+
 class RowGatherer:
     def __init__(self, *, max_slots: int, window: int, hidden: int, n_taps: int,
                  max_rows: int, device: torch.device, dtype: torch.dtype = torch.bfloat16,
-                 fused: bool | None = None):
+                 fused: bool | None = None, host_msg: torch.Tensor | None = None,
+                 host_meta: torch.Tensor | None = None, d2h=None, meta_slots: int = 1):
+        """host_msg / host_meta: caller-owned host buffers for the STEP message (uint8
+        [msg_capacity]) and the metadata (int64 [meta_slots, 4, max_slots]) instead of pinned
+        ones (the process proxy's shared region, registered by its owner); d2h(dst, src): the
+        device-to-host copy into them (default: Tensor.copy_(non_blocking=True)).
+        meta_slots: async rounds keep each round's metadata in slot t % meta_slots
+        (roundcore.META_SLOTS), so a late proxy never reads a later round's metadata."""
         self.max_slots, self.window, self.hidden, self.n_taps = max_slots, window, hidden, n_taps
         self.max_rows = max_rows
         self.device = torch.device(device)
@@ -90,7 +73,13 @@ class RowGatherer:
         self.stage = torch.empty(max_rows + 1, self.row_elems, dtype=dtype, device=self.device)
         self.msg_capacity = (wire.APP_HEADER_SIZE + wire.rows_offset_for(max_slots)
                              + max_rows * self.row_bytes)
-        self.msg = torch.empty(self.msg_capacity, dtype=torch.uint8, pin_memory=self.pin)
+        if host_msg is not None:
+            if host_msg.dtype != torch.uint8 or host_msg.numel() < self.msg_capacity:
+                raise ValueError(f"host_msg {tuple(host_msg.shape)} {host_msg.dtype} < {self.msg_capacity} B")
+            self.msg = host_msg[:self.msg_capacity]
+        else:
+            self.msg = torch.empty(self.msg_capacity, dtype=torch.uint8, pin_memory=self.pin)
+        self._d2h = d2h or _copy_non_blocking
         self.msg_np = self.msg.numpy()
         # Index uploads use a fresh pinned tensor per round: in async mode the host runs
         # ahead of the GPU, and torch's caching host allocator keeps a pinned block until the
@@ -108,7 +97,15 @@ class RowGatherer:
         self.ring_idx_host = torch.empty(max_rows, dtype=torch.int64, pin_memory=self.pin)
         self.ring_stage = torch.empty(max_rows, self.row_elems, dtype=dtype, device=self.device)
         self.meta_dev = torch.zeros(4, max_slots, dtype=torch.int64, device=self.device)
-        self.meta_host = torch.zeros(4, max_slots, dtype=torch.int64, pin_memory=self.pin)
+        self.meta_slots = int(meta_slots)
+        if host_meta is not None:
+            if host_meta.dtype != torch.int64 or tuple(host_meta.shape) != (self.meta_slots, 4, max_slots):
+                raise ValueError(f"host_meta {tuple(host_meta.shape)} {host_meta.dtype}, expected int64 "
+                                 f"({self.meta_slots}, 4, {max_slots})")
+            self.meta_host = host_meta
+        else:
+            self.meta_host = torch.zeros(self.meta_slots, 4, max_slots, dtype=torch.int64,
+                                         pin_memory=self.pin)
         self.meta_np = self.meta_host.numpy()   # collect() runs on the async proxy thread: no torch call there
         self.event = torch.cuda.Event() if cuda else None
         # one-launch Triton gather (fused_gather.py): default on CUDA when Triton imports
@@ -231,12 +228,9 @@ class RowGatherer:
         self._sync()
         return self.collect(bv.n, R)
 
-    def collect(self, n: int, n_candidates: int) -> GatherResult:
-        """Read the metadata of the last enqueue (after its copy completed)."""
-        mh = self.meta_np
-        return GatherResult(valid=mh[0, :n].copy(), first_pos=mh[1, :n].copy(),
-                            anchor=mh[2, :n].copy(), sampled=mh[3, :n].astype(bool),
-                            n_candidates=n_candidates)
+    def collect(self, n: int, n_candidates: int, meta_slot: int = 0) -> GatherResult:
+        """Read the metadata an enqueue wrote into meta_slot (after its copy completed)."""
+        return collect_meta(self.meta_np[meta_slot], n, n_candidates)
 
     @torch.inference_mode()
     def enqueue(
@@ -249,9 +243,10 @@ class RowGatherer:
         idx_mapping: torch.Tensor,
         last_sampled: torch.Tensor,
         next_prefill_tokens: torch.Tensor,
+        meta_slot: int = 0,
     ) -> int:
         """Enqueue the gather, ring update and the copies into pinned memory on the current
-        stream; no host sync. Returns the number of candidate rows."""
+        stream (metadata into meta_slot); no host sync. Returns the number of candidate rows."""
         n, W = bv.n, self.window
         if not 1 <= n <= self.max_slots:
             raise ValueError(f"{n} requests, max_slots {self.max_slots}")
@@ -275,8 +270,8 @@ class RowGatherer:
                 log.warning("remote DSpark fused gather disabled (%s); torch gather", e)
                 self.fused = False
             else:
-                self.rows_view(n, R).copy_(self.stage[:R], non_blocking=True)
-                self.meta_host.copy_(self.meta_dev, non_blocking=True)
+                self._d2h(self.rows_view(n, R), self.stage[:R])
+                self._d2h(self.meta_host[meta_slot], self.meta_dev)
                 return R
         cand_req = np.repeat(np.arange(n, dtype=np.int64), nc)
         cand_r = np.arange(R, dtype=np.int64) - np.repeat(np.cumsum(nc) - nc, nc)
@@ -319,8 +314,8 @@ class RowGatherer:
         meta[1].copy_(positions.index_select(0, start_d).to(torch.int64))
         meta[2].copy_(anchor)
         meta[3].copy_(sampled.to(torch.int64))
-        self.rows_view(n, R).copy_(self.stage[:R], non_blocking=True)
-        self.meta_host.copy_(self.meta_dev, non_blocking=True)
+        self._d2h(self.rows_view(n, R), self.stage[:R])
+        self._d2h(self.meta_host[meta_slot], self.meta_dev)
         return R
 
     @torch.inference_mode()

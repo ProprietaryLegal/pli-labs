@@ -35,6 +35,10 @@ class SameDevicePair:
         self.vocab = 1 << 62
         self.timeout_ns = int(timeout_ms * 1e6)
         self.streams = [torch.cuda.Stream(dev), torch.cuda.Stream(dev)]
+        self.cancel_streams = [torch.cuda.Stream(dev), torch.cuda.Stream(dev)]
+        self.launch_streams = set()
+        self.poisoned = None
+        self.idle_timeout_s = 10.0
         p2p.preload(dev)
         warm_torch(dev)
 
@@ -45,6 +49,12 @@ class SameDevicePair:
     xchg_argmax = p2p.P2PPair.xchg_argmax
     xchg_margin = p2p.P2PPair.xchg_margin
     xchg_markov = p2p.P2PPair.xchg_markov
+    _launch = p2p.P2PPair._launch
+    _usable = p2p.P2PPair._usable
+    poison = p2p.P2PPair.poison
+    headers = p2p.P2PPair.headers
+    reset = p2p.P2PPair.reset
+    cancel = p2p.P2PPair.cancel
 
 
 def warm_torch(dev):
@@ -240,12 +250,14 @@ def test_xchg_markov_matches_triton_finish():
             assert torch.equal(o.cpu()[:, trial % 5], want), (trial, o[:, trial % 5], want)
 
 
-def test_bad_received_id_is_refused():
+@pytest.mark.parametrize("bad_rank", [0, 1])
+def test_bad_received_id_is_refused(bad_rank):
     """A peer id outside [0, vocab) never reaches the output: the rank keeps its own candidate, error bit 2 is set."""
     pr = make_pair()
     pr.vocab = 1000
-    vals = [torch.tensor([1.0]), torch.tensor([5.0])]               # rank 1 would win
-    idxs = [torch.tensor([7]), torch.tensor([10 ** 12])]            # but its id (+ v_off) is out of range
+    vals = [torch.tensor([1.0]), torch.tensor([5.0])]
+    idxs = [torch.tensor([7]), torch.tensor([10])]
+    idxs[bad_rank] = torch.tensor([10 ** 12])
     outs = []
     for r in range(2):
         d = pr.devs[r]
@@ -253,7 +265,128 @@ def test_bad_received_id_is_refused():
             out = torch.full((1, 5), -1, dtype=torch.int64, device=d)
             pr.xchg_argmax(r, vals[r].to(d), idxs[r].to(d), 0 if r == 0 else 500, out, 0)
             outs.append(out)
-    for r in range(2):
-        torch.cuda.synchronize(pr.devs[r])
-    assert int(outs[0][0, 0]) == 7                                   # rank 0 refused the bad id, kept its own
+    # Check rank 0 alone, exactly as STEP does. Synchronizing rank 1 first could conceal late publication.
+    done = torch.cuda.Event()
+    done.record(pr.streams[0])
+    done.synchronize()
     assert int(pr.st[0].hdr[2].cpu()) & 4
+    receiver = 1 - bad_rank
+    torch.cuda.synchronize(pr.devs[receiver])
+    assert int(outs[receiver][0, 0]) == int(idxs[receiver][0]) + 500 * receiver
+    assert all(h[2] & 4 for h in pr.headers())   # either rank's validation failure refuses BOTH ranks' step
+
+
+def test_last_valid_epochs_and_graph_replay():
+    pr = make_pair()
+    xs = [torch.randn(5120, device=d) for d in pr.devs]
+    ys = [torch.empty_like(x) for x in xs]
+    want = xs[0].cpu() + xs[1].cpu()
+    graphs = []
+    for r in range(2):
+        with torch.cuda.device(pr.devs[r]):
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g, stream=pr.streams[r]):
+                pr.ar_sum(r, xs[r], ys[r], 8)
+            graphs.append(g)
+    for _ in range(128):
+        for r in range(2):
+            with torch.cuda.device(pr.devs[r]), torch.cuda.stream(pr.streams[r]):
+                graphs[r].replay()
+    h = pr.headers()
+    assert h[0][0] == h[1][0] == 128 and all(a[2] == 0 for a in h), h
+    assert all(torch.equal(y.cpu(), want) for y in ys)
+    for s in pr.st:
+        s.hdr[0] = -3  # uint32 max - 2: the last even and odd epochs must still work
+        torch.cuda.synchronize(s.dev)
+    for _ in range(2):
+        for r in range(2):
+            with torch.cuda.device(pr.devs[r]), torch.cuda.stream(pr.streams[r]):
+                graphs[r].replay()
+    h = pr.headers()
+    assert all(a[0] == -1 and a[2] == 0 for a in h), h
+    assert all(torch.equal(y.cpu(), want) for y in ys)
+
+
+def test_epoch_exhaustion_never_matches_unpublished_zero_flags():
+    pr = make_pair()
+    # A previously unused block flag is still zero. Allowing uint32 wrap to epoch zero would accept it without a peer.
+    for s in pr.st:
+        s.hdr[0] = -1  # uint32 max
+        torch.cuda.synchronize(s.dev)
+    d = pr.devs[0]
+    x = torch.randn(4 * 5120, device=d)
+    y = torch.empty_like(x)
+    with torch.cuda.device(d), torch.cuda.stream(pr.streams[0]):
+        pr.ar_sum(0, x, y, 64)  # peer never launches; must refuse immediately, never read the zero-epoch buffer
+    h = pr.headers()
+    assert all(a[2] & 16 for a in h), h
+    assert torch.equal(x, y)
+    pr.reset()
+    run_sequence(pr, seed=91, n_ops=12)
+
+
+def test_cancel_drains_noncurrent_stream_before_reset():
+    import time
+    pr = make_pair()
+    pr.timeout_ns = int(5e9)
+    d = pr.devs[0]
+    x = torch.randn(4 * 5120, device=d)
+    y = torch.empty_like(x)
+    torch.cuda.synchronize(d)
+    with torch.cuda.device(d), torch.cuda.stream(pr.streams[0]):
+        pr.ar_sum(0, x, y, 8)  # park a NON-current stream, not the default one reset/headers are called from
+    start = time.monotonic()
+    pr.cancel()
+    h = pr.headers()
+    assert time.monotonic() - start < 2, h  # cancellation, not the 5-second kernel timeout
+    assert all(a[2] & 8 for a in h), h
+    assert torch.equal(x, y)
+    pr.reset()
+    run_sequence(pr, seed=92, n_ops=12)
+
+
+def test_peer_copy_reference():
+    from worker.p2p.reference import all_reduce
+    pr = make_pair()
+    for dtype in (torch.float32, torch.bfloat16):
+        xs = tuple(torch.randn(5120, device=d) for d in pr.devs)
+        expected = (xs[0].cpu() + xs[1].cpu()).to(dtype)
+        reference = all_reduce(xs, dtype)
+        out = [torch.empty(5120, dtype=dtype, device=d) for d in pr.devs]
+        for r in range(2):
+            with torch.cuda.device(pr.devs[r]), torch.cuda.stream(pr.streams[r]):
+                pr.ar_sum(r, xs[r], out[r], 8)
+        pr.headers()
+        assert all(torch.equal(a.cpu(), expected) for a in reference)
+        assert all(torch.equal(a.cpu(), expected) for a in out)
+
+
+def test_native_argument_device_checks():
+    pr = make_pair()
+    d = pr.devs[0]
+    val = torch.ones(1, device=d)
+    idx_cpu = torch.zeros(1, dtype=torch.int64)
+    out = torch.zeros(1, 1, dtype=torch.int64, device=d)
+    with pytest.raises(RuntimeError, match="every tensor must be on"):
+        # Call the native boundary directly so argument refusal does not poison a live pair in this test.
+        p2p.ext().xchg_argmax(val, idx_cpu, 0, 100, out, 0, True, pr.st[0].buf, pr.peer(0),
+                             pr.max_words, pr.timeout_ns)
+
+
+def test_runtime_expandable_allocator_cannot_change_peer_state_allocation():
+    """exllamav3 imports set this option through a runtime API, without changing either allocator environment var."""
+    setter = torch.cuda.memory._set_allocator_settings
+    setter("expandable_segments:True")
+    try:
+        probes = [torch.empty(32 << 20, dtype=torch.uint8, device=torch.device("cuda", i))
+                  for i in range(torch.cuda.device_count())]
+        pr = make_pair()
+        segments = torch.cuda.memory_snapshot()
+        assert any(s.get("is_expandable", False) for s in segments)
+        for st in pr.st:
+            assert not any(s["address"] <= st.ptr < s["address"] + s["total_size"] for s in segments), \
+                "raw peer destination must not come from Torch's allocator (including cached expandable segments)"
+        run_sequence(pr, seed=93, n_ops=60)
+        del probes
+    finally:
+        setter("expandable_segments:False")

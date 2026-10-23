@@ -2,128 +2,57 @@
 """Hand-off between the engine stream and the round's proxy thread (async mode).
 
 The engine stream must not run past a remote round before its drafts are in device memory, and the CPU must not block
-either. Two 32-bit words in registered, device-mapped host memory carry the hand-off:
+either. Words and the reply live in one C-owned page of registered, device-mapped host memory:
 
     engine thread (enqueues, never blocks):
         gather(t) -> D2H rows/meta -> [WRITE gathered = t] -> [WAIT released >= t] -> H2D reply -> TP broadcast ...
-    proxy thread (plain CPU, no CUDA call):
-        wait gathered >= t (acquire) -> network round -> write the reply into pinned host memory -> released = t (release)
+    proxy thread (no CUDA call):
+        wait gathered >= t (acquire) -> network round -> build the reply in a private buffer ->
+        publish(t): claim t, copy the reply into the page, release t (one GIL-free C call)
+    watchdog (C thread, no Python, no CUDA):
+        gathered > released for longer than the deadline -> claim that round, write a failed reply, release it
 
-The proxy thread makes NO CUDA call. The first async design (a side stream on the proxy thread wrote a device flag after
-an H2D copy) deadlocked on GB10 twice: a CUDA call on the proxy thread waited behind a module load on the engine thread,
-and the module load waited for the device, whose stream was parked on the flag (offload/results/C/lazy-repro/RESULT.md).
-With host words the parked stream is released by a CPU store, which needs no CUDA lock. The engine's Engram spin reader
-uses the same handshake on GB10 (engram_disk.cpp enable_spin / poll): malloc memory registered Mapped|Portable (not
-cudaHostAlloc, which GB10's CPU reaches over an uncached path), cuStreamWriteValue32 / cuStreamWaitValue32 on its device
-pointer, CPU acquire loads / release stores.
+Why no CUDA on the proxy: the first async design (a side stream on the proxy thread wrote a device flag after an H2D
+copy) deadlocked on GB10: a CUDA call on the proxy waited behind a module load on the engine thread, and the module load
+waited for the device, whose stream was parked on the flag (offload/results/C/lazy-repro/RESULT.md). A host word is
+released by a CPU store, which needs no CUDA lock. The engine's Engram spin reader uses the same handshake on GB10
+(engram_disk.cpp enable_spin / poll): malloc memory registered Mapped|Portable (not cudaHostAlloc, which GB10's CPU
+reaches over an uncached path), cuStreamWriteValue32 / cuStreamWaitValue32 on its device pointer, CPU acquire loads /
+release stores.
+
+Why the watchdog (review S9, F2/F5): the proxy is a Python thread. If it cannot run - the engine thread waits for the
+parked stream inside an extension that holds the GIL (P1), a GC finalizer on the proxy makes a CUDA call that blocks
+behind a module load, the proxy died (P2), the interpreter is shutting down - nothing would release the stream, and
+cuStreamWaitValue32 has no timeout. The watchdog bounds every such case to one fail-closed round (zero drafts).
+CUDA_MODULE_LOADING=EAGER stays in the async configs (S9 F1): it removes the first-launch module loads that make an
+extension wait for the parked stream in the first place.
 
 Ordering:
   * gathered: CU_STREAM_WRITE_VALUE_DEFAULT puts a stream-scoped system fence before the write, so the D2H rows and
     metadata enqueued before it are visible to the CPU once the word is; the proxy's acquire load orders its reads after.
-  * released: the proxy's release store orders its reply writes before the word; the engine stream's H2D copy of the
-    reply is enqueued after the wait, so the copy engine reads the host bytes only after the wait passed.
-  * reuse of the pinned reply and staging buffers: the proxy sees gathered >= t+1 only after the stream ran everything
-    enqueued before round t+1's gather, including round t's H2D reply copy, so it may rewrite them for round t+1.
-
-The CPU side of the words lives in hostflag.c (ctypes.CDLL releases the GIL for every call): an acquire-load spin wait
-and a release store. ``FakeHostFlagSync`` stands in on CPU tests (the "stream" wait blocks the caller).
+  * released: publish / fail-release write the reply, then release-store the word (monotonic); the engine stream's H2D
+    copy of the reply is enqueued after the wait, so the copy engine reads the page only after the wait passed.
+  * reply / staging reuse: the proxy or the watchdog writes round t's reply only after gathered >= t, i.e. after the
+    stream ran everything before round t's gather, including round t-1's reply copy.
+  * claim word: exactly one of the proxy's publish and the watchdog's failure writes and releases a given round.
+  * every release is monotonic (cyclic max): nothing can move the word backwards (S9 F3).
 """
 
 from __future__ import annotations
 
 import ctypes
-import hashlib
-import os
-import shutil
-import stat
-import subprocess
-import tempfile
-import threading
+import gc
 import time
 
+import numpy as np
 import torch
 
-CU_STREAM_WAIT_VALUE_GEQ = 0x0          # (int32)(*addr - value) >= 0: wrap-safe
-CU_STREAM_WRITE_VALUE_DEFAULT = 0x0     # with a memory fence before the write
-CU_MEMHOSTREGISTER_PORTABLE = 0x01
-CU_MEMHOSTREGISTER_DEVICEMAP = 0x02
-
-HOSTFLAG_LIB = "libdsv41_hostflag.so"
-HOSTFLAG_VERSION = 1
-PAGE = 4096
-OFF_GATHERED = 0        # written by the engine stream
-OFF_RELEASED = 128      # written by the proxy thread (its own cache line)
-_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hostflag.c")
-
-
-class StreamSyncError(RuntimeError):
-    pass
-
-
-# ---------------------------------------------------------------------------------------------------- the C helper
-
-def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
-    lib.dsv41_hf_version.restype = ctypes.c_int
-    lib.dsv41_hf_version.argtypes = []
-    lib.dsv41_hf_alloc.restype = ctypes.c_void_p
-    lib.dsv41_hf_alloc.argtypes = [ctypes.c_size_t]
-    lib.dsv41_hf_free.restype = None
-    lib.dsv41_hf_free.argtypes = [ctypes.c_void_p]
-    lib.dsv41_hf_load.restype = ctypes.c_uint32
-    lib.dsv41_hf_load.argtypes = [ctypes.c_void_p]
-    lib.dsv41_hf_store.restype = None
-    lib.dsv41_hf_store.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.dsv41_hf_wait_geq.restype = ctypes.c_int
-    lib.dsv41_hf_wait_geq.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int64, ctypes.c_int64,
-                                      ctypes.c_int64]
-    v = lib.dsv41_hf_version()
-    if v != HOSTFLAG_VERSION:
-        raise StreamSyncError(f"{lib._name}: hostflag version {v}, expected {HOSTFLAG_VERSION}")
-    return lib
-
-
-def _private_dir(path: str) -> None:
-    """Create (or accept) a build directory only this user can write."""
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    st = os.lstat(path)
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
-        raise StreamSyncError(f"hostflag build directory {path} is not a private directory of uid {os.getuid()}")
-
-
-def _compile(cc: str, out_dir: str) -> str:
-    with open(_SRC, "rb") as f:
-        digest = hashlib.sha256(f.read()).hexdigest()[:16]
-    d = os.path.join(out_dir, f"dsv41-hostflag-{os.getuid()}-{digest}")
-    _private_dir(d)
-    so = os.path.join(d, HOSTFLAG_LIB)
-    if not os.path.exists(so):
-        tmp = so + f".tmp{os.getpid()}"
-        r = subprocess.run([cc, "-O2", "-Wall", "-shared", "-fPIC", "-o", tmp, _SRC],
-                           capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            raise StreamSyncError(f"compiling {_SRC} with {cc} failed ({r.returncode}): {r.stderr.strip()[:400]}")
-        os.replace(tmp, so)
-    return so
-
-
-def load_hostflag(lib_path: str = "") -> tuple[ctypes.CDLL, str]:
-    """libdsv41_hostflag.so: an explicit path, else VLLM_DSPARK_REMOTE_OFL_DIR's copy, else hostflag.c compiled with
-    the system C compiler into a private directory under the temp dir. Returns (library, where it came from)."""
-    if lib_path:
-        if not os.path.exists(lib_path):
-            raise StreamSyncError(f"VLLM_DSPARK_REMOTE_HOSTFLAG_LIB={lib_path} does not exist")
-        return _bind(ctypes.CDLL(lib_path)), lib_path
-    ofl_dir = (os.environ.get("VLLM_DSPARK_REMOTE_OFL_DIR") or "").strip()
-    if ofl_dir and os.path.exists(os.path.join(ofl_dir, HOSTFLAG_LIB)):
-        p = os.path.join(ofl_dir, HOSTFLAG_LIB)
-        return _bind(ctypes.CDLL(p)), p
-    cc = shutil.which("cc") or shutil.which("gcc")
-    if cc is None:
-        raise StreamSyncError(f"no {HOSTFLAG_LIB} (set VLLM_DSPARK_REMOTE_HOSTFLAG_LIB or put it in "
-                              "VLLM_DSPARK_REMOTE_OFL_DIR) and no C compiler to build hostflag.c")
-    p = _compile(cc, tempfile.gettempdir())
-    return _bind(ctypes.CDLL(p)), f"{p} (compiled at startup)"
-
+from .hostflag import (  # noqa: F401 -- re-exported: the host side moved to hostflag.py (torch-free)
+    _M32, _SRC, _V, CU_MEMHOSTREGISTER_DEVICEMAP, CU_MEMHOSTREGISTER_PORTABLE, CU_STREAM_WAIT_VALUE_GEQ,
+    CU_STREAM_WRITE_VALUE_DEFAULT, FAR_AHEAD, HOSTFLAG_LIB, HOSTFLAG_VERSION, OFF_CLAIMED, OFF_CONSUMED, OFF_GATHERED,
+    OFF_RELEASED,
+    OFF_REPLY, PAGE_BYTES, REPLY_CAPACITY, HostFlagCore, StreamStuckError, StreamSyncError, _bind, _compile,
+    _private_dir, load_hostflag)
 
 # ---------------------------------------------------------------------------------------------------- CUDA side
 
@@ -146,17 +75,23 @@ class _Driver:
         self.wait = sym("cuStreamWaitValue32_v2", "cuStreamWaitValue32")
         self.write = sym("cuStreamWriteValue32_v2", "cuStreamWriteValue32")
         for f in (self.wait, self.write):
-            f.argtypes = [ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint]
+            f.argtypes = [_V, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint]
             f.restype = ctypes.c_int
         self.register = sym("cuMemHostRegister_v2", "cuMemHostRegister")
-        self.register.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+        self.register.argtypes = [_V, ctypes.c_size_t, ctypes.c_uint]
         self.register.restype = ctypes.c_int
         self.unregister = sym("cuMemHostUnregister")
-        self.unregister.argtypes = [ctypes.c_void_p]
+        self.unregister.argtypes = [_V]
         self.unregister.restype = ctypes.c_int
         self.devptr = sym("cuMemHostGetDevicePointer_v2", "cuMemHostGetDevicePointer")
-        self.devptr.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_void_p, ctypes.c_uint]
+        self.devptr.argtypes = [ctypes.POINTER(ctypes.c_uint64), _V, ctypes.c_uint]
         self.devptr.restype = ctypes.c_int
+        self.h2d = sym("cuMemcpyHtoDAsync_v2", "cuMemcpyHtoDAsync")
+        self.h2d.argtypes = [ctypes.c_uint64, _V, ctypes.c_size_t, _V]
+        self.h2d.restype = ctypes.c_int
+        self.d2h = sym("cuMemcpyDtoHAsync_v2", "cuMemcpyDtoHAsync")
+        self.d2h.argtypes = [_V, ctypes.c_uint64, ctypes.c_size_t, _V]
+        self.d2h.restype = ctypes.c_int
 
 
 def _check(r: int, what: str) -> None:
@@ -164,190 +99,316 @@ def _check(r: int, what: str) -> None:
         raise StreamSyncError(f"{what} failed: CUresult {r}")
 
 
-class HostFlagSync:
-    """Rank 0's async hand-off (see the module docstring). Engine-thread calls (gathered, wait_release, self_test,
-    reset, close) may use CUDA; proxy-thread calls (wait_gathered, release) never do."""
+class RegisteredRegion:
+    """A process proxy's shared region (shmregion.SharedRegion) registered with CUDA once, Portable | DeviceMap (memfd
+    pages, ordinary cached memory: the property the hand-off page always had on GB10). The engine stream writes the
+    gather staging into it, reads the reply from it and runs its stream memory operations on its hostflag page.
+    Unregistered only by unregister(), after the stream drained; normally never (the process exit releases it)."""
 
-    cuda_free_proxy = True
-
-    def __init__(self, device: torch.device, lib_path: str = "", spin_us: int = 1000, nap_us: int = 0):
+    def __init__(self, region, device: torch.device):
+        self.region = region
         self.device = torch.device(device)
-        if self.device.type != "cuda":
-            raise StreamSyncError("HostFlagSync needs a CUDA device")
-        self.lib, self.lib_origin = load_hostflag(lib_path)
+        self.base = region.base
+        self.size = region.layout.size
+        self.page_addr = region.page_addr
         self.drv = _Driver()
-        self.spin_ns = int(spin_us) * 1000
-        self.nap_ns = int(nap_us) * 1000
-        # the driver calls below need the device's primary context current on this thread
         torch.cuda.set_device(self.device)
         torch.cuda.synchronize(self.device)
-        page = self.lib.dsv41_hf_alloc(PAGE)
-        if not page:
-            raise StreamSyncError("hostflag page allocation failed")
-        self.page = int(page)
+        _check(self.drv.register(_V(self.base), self.size, CU_MEMHOSTREGISTER_PORTABLE | CU_MEMHOSTREGISTER_DEVICEMAP),
+               "cuMemHostRegister(region)")
+        d = ctypes.c_uint64(0)
+        r = self.drv.devptr(ctypes.byref(d), _V(self.base), 0)
+        if r != 0:
+            self.drv.unregister(_V(self.base))
+            _check(r, "cuMemHostGetDevicePointer(region)")
+        self.dev_base = int(d.value)
+        self.registered = True
+
+    def dev_addr(self, host_addr: int) -> int:
+        off = host_addr - self.base
+        if not 0 <= off < self.size:
+            raise StreamSyncError(f"address {host_addr:#x} outside the registered region")
+        return self.dev_base + off
+
+    def d2h(self, dst: torch.Tensor, src: torch.Tensor) -> None:
+        """Enqueue src (device, contiguous) -> dst (a contiguous view of this region) on the current stream with the
+        driver's async copy: registered memory, so it never degrades to a synchronous pageable copy."""
+        n = src.numel() * src.element_size()
+        if (src.device.type != "cuda" or not src.is_contiguous() or not dst.is_contiguous()
+                or dst.numel() * dst.element_size() != n):
+            raise StreamSyncError(f"region copy {tuple(src.shape)} {src.dtype} on {src.device} -> "
+                                  f"{tuple(dst.shape)} {dst.dtype} on {dst.device}")
+        if n == 0:
+            return
+        self.dev_addr(dst.data_ptr() + n - 1)        # the whole destination lies in the region
+        s = torch.cuda.current_stream(self.device)
+        _check(self.drv.d2h(_V(dst.data_ptr()), src.data_ptr(), n, _V(s.cuda_stream)), "cuMemcpyDtoHAsync(region)")
+
+    def probe_tensor(self) -> torch.Tensor:
+        """int32 [1] at the control block's probe word (self-test target)."""
+        from .shmregion import C_PROBE
+
+        L = self.region.layout
+        return torch.frombuffer(self.region.mm, dtype=torch.int32, count=1, offset=L.off_ctrl + C_PROBE)
+
+    def unregister(self) -> None:
+        """Only after the stream drained and the proxy stopped."""
+        if self.registered:
+            torch.cuda.synchronize(self.device)
+            self.drv.unregister(_V(self.base))
+            self.registered = False
+
+
+class HostFlagSync(HostFlagCore):
+    """Rank 0's async hand-off on a CUDA device. Engine-thread calls (gathered, wait_release, copy_reply, self_test,
+    attach, close) may use CUDA; proxy-thread calls (wait_gathered, publish) and the watchdog never do."""
+
+    def __init__(self, device: torch.device, lib_path: str = "", spin_us: int = 1000, nap_us: int = 0,
+                 region=None):
+        """region: None = a page of its own, registered here; else a registered shared region (RegisteredRegion,
+        process proxy) whose hostflag page this uses and whose owner unregisters it."""
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise StreamSyncError("HostFlagSync needs a CUDA device")
+        super().__init__(lib_path, spin_us, nap_us, page=region.page_addr if region is not None else 0)
+        self.device = device
+        self.region = region
+        self.shared = region.region if region is not None else None     # shmregion.SharedRegion (process proxy)
+        if region is not None:
+            self.drv = region.drv
+            self.page_dev = region.dev_addr(self.page)
+            self.gathered_dev = self.page_dev + OFF_GATHERED
+            self.released_dev = self.page_dev + OFF_RELEASED
+            self.consumed_dev = self.page_dev + OFF_CONSUMED
+            return
         try:
-            _check(self.drv.register(ctypes.c_void_p(self.page), PAGE,
+            self.drv = _Driver()
+            # the driver calls below need the device's primary context current on this thread
+            torch.cuda.set_device(self.device)
+            torch.cuda.synchronize(self.device)
+            _check(self.drv.register(_V(self.page), PAGE_BYTES,
                                      CU_MEMHOSTREGISTER_PORTABLE | CU_MEMHOSTREGISTER_DEVICEMAP),
                    "cuMemHostRegister")
-        except StreamSyncError:
-            self.lib.dsv41_hf_free(ctypes.c_void_p(self.page))
+        except BaseException:
+            HostFlagCore.close(self)
             raise
         d = ctypes.c_uint64(0)
-        _check(self.drv.devptr(ctypes.byref(d), ctypes.c_void_p(self.page), 0), "cuMemHostGetDevicePointer")
+        r = self.drv.devptr(ctypes.byref(d), _V(self.page), 0)
+        if r != 0:     # S9 F7: do not leak the registration
+            self.drv.unregister(_V(self.page))
+            HostFlagCore.close(self)
+            _check(r, "cuMemHostGetDevicePointer")
         self.page_dev = int(d.value)
-        self.gathered_host = self.page + OFF_GATHERED
-        self.released_host = self.page + OFF_RELEASED
         self.gathered_dev = self.page_dev + OFF_GATHERED
         self.released_dev = self.page_dev + OFF_RELEASED
+        self.consumed_dev = self.page_dev + OFF_CONSUMED
 
     # -------------------------------------------------- engine thread (stream-ordered, never blocks the CPU)
 
     def gathered(self, value: int, stream: torch.cuda.Stream | None = None) -> None:
         """Enqueue "gathered = value" after everything already on the stream (fenced)."""
         s = stream or torch.cuda.current_stream(self.device)
-        _check(self.drv.write(ctypes.c_void_p(s.cuda_stream), self.gathered_dev, value & 0xFFFFFFFF,
-                              CU_STREAM_WRITE_VALUE_DEFAULT), "cuStreamWriteValue32(gathered)")
+        _check(self.drv.write(_V(s.cuda_stream), self.gathered_dev, value & _M32, CU_STREAM_WRITE_VALUE_DEFAULT),
+               "cuStreamWriteValue32(gathered)")
 
     def wait_release(self, value: int, stream: torch.cuda.Stream | None = None) -> None:
         """Enqueue a wait until released >= value (wrap-safe)."""
         s = stream or torch.cuda.current_stream(self.device)
-        _check(self.drv.wait(ctypes.c_void_p(s.cuda_stream), self.released_dev, value & 0xFFFFFFFF,
-                             CU_STREAM_WAIT_VALUE_GEQ), "cuStreamWaitValue32(released)")
+        _check(self.drv.wait(_V(s.cuda_stream), self.released_dev, value & _M32, CU_STREAM_WAIT_VALUE_GEQ),
+               "cuStreamWaitValue32(released)")
 
-    # -------------------------------------------------- proxy thread (CPU only)
+    def consumed(self, value: int, stream: torch.cuda.Stream | None = None) -> None:
+        """Enqueue "consumed = value" after the reply copy (fenced): the explicit consumer acknowledgment."""
+        s = stream or torch.cuda.current_stream(self.device)
+        _check(self.drv.write(_V(s.cuda_stream), self.consumed_dev, value & _M32, CU_STREAM_WRITE_VALUE_DEFAULT),
+               "cuStreamWriteValue32(consumed)")
 
-    def wait_gathered(self, value: int, timeout_s: float) -> bool:
-        """True once gathered >= value; False after timeout_s. Releases the GIL while it waits."""
-        r = self.lib.dsv41_hf_wait_geq(ctypes.c_void_p(self.gathered_host), value & 0xFFFFFFFF,
-                                       int(timeout_s * 1e9), self.spin_ns, self.nap_ns)
-        return r == 0
+    def drain_marker(self, stream: torch.cuda.Stream | None = None) -> torch.cuda.Event:
+        """An event recorded after everything enqueued on the stream so far (the respawn waits for it: no stream
+        operation of the lost proxy's rounds may still reference the words when they are reset)."""
+        ev = torch.cuda.Event()
+        ev.record(stream or torch.cuda.current_stream(self.device))
+        return ev
 
-    def release(self, value: int) -> None:
-        self.lib.dsv41_hf_store(ctypes.c_void_p(self.released_host), value & 0xFFFFFFFF)
+    def drained(self, marker) -> bool:
+        """cudaEventQuery only: never a synchronization on a stream that may be parked."""
+        return marker is None or bool(marker.query())
 
-    def values(self) -> tuple[int, int]:
-        return (int(self.lib.dsv41_hf_load(ctypes.c_void_p(self.gathered_host))),
-                int(self.lib.dsv41_hf_load(ctypes.c_void_p(self.released_host))))
+    def d2h(self, dst: torch.Tensor, src: torch.Tensor) -> None:
+        """Process proxy: a stream-ordered copy into the registered shared region."""
+        if self.region is None:
+            raise StreamSyncError("d2h needs a registered shared region")
+        self.region.d2h(dst, src)
 
-    # -------------------------------------------------- setup (engine thread, no round in flight)
+    def copy_reply(self, dst: torch.Tensor, nbytes: int | None = None,
+                   stream: torch.cuda.Stream | None = None) -> None:
+        """Enqueue the H2D copy of the reply area into dst (async: the page is registered memory)."""
+        n = self.reply_bytes if nbytes is None else int(nbytes)
+        if dst.device.type != "cuda" or not dst.is_contiguous() or dst.numel() * dst.element_size() < n:
+            raise StreamSyncError(f"reply destination {tuple(dst.shape)} {dst.dtype} on {dst.device} cannot take "
+                                  f"{n} bytes")
+        s = stream or torch.cuda.current_stream(self.device)
+        _check(self.drv.h2d(dst.data_ptr(), _V(self.reply_host), n, _V(s.cuda_stream)), "cuMemcpyHtoDAsync(reply)")
 
-    def reset(self) -> None:
-        torch.cuda.synchronize(self.device)
-        self.lib.dsv41_hf_store(ctypes.c_void_p(self.gathered_host), 0)
-        self.lib.dsv41_hf_store(ctypes.c_void_p(self.released_host), 0)
+    # -------------------------------------------------- setup
 
     def describe(self) -> dict:
-        return {"mechanism": "host_flags", "lib": self.lib_origin, "spin_us": self.spin_ns // 1000,
-                "nap_us": self.nap_ns // 1000}
+        d = super().describe()
+        d["device"] = str(self.device)
+        return d
 
     def self_test(self, timeout_s: float = 2.0) -> tuple[bool, str]:
         """On this device: (1) the CPU sees data the stream copied before "gathered" once it sees the word; (2) the
-        stream does not pass the wait before the CPU's release, and its copy after the wait reads the bytes the CPU
-        wrote before releasing. The CPU never needs CUDA to unblock the stream, so a failed test cannot leave it
-        parked: the rescue is a release store."""
+        stream does not pass the wait before the CPU's publish, and the reply copy after the wait reads the bytes the
+        publish wrote (the production path: claim, copy into the registered page, release, driver H2D). The rescue is
+        a CPU store; if the stream still does not drain, this device does not observe host stores and the stream
+        cannot be recovered: StreamStuckError (S9 F4)."""
+        if self._wd is not None:
+            raise StreamSyncError("self-test after attach")
         dev = self.device
         main = torch.cuda.current_stream(dev)
         self.reset()
         y = torch.zeros(1, dtype=torch.int32, device=dev)
-        x = torch.zeros(1, dtype=torch.int32, device=dev)
+        x = torch.zeros(4, dtype=torch.int32, device=dev)
         h_out = torch.zeros(1, dtype=torch.int32, pin_memory=True)
-        h_in = torch.zeros(1, dtype=torch.int32, pin_memory=True)
-        # every kernel this test launches runs once before anything parks the stream (lazy module loading)
+        # every kernel / copy this test launches runs once before anything parks the stream (lazy module loading)
         torch.cuda._sleep(1)
         y.fill_(5)
         h_out.copy_(y, non_blocking=True)
-        x.copy_(h_in, non_blocking=True)
+        self.copy_reply(x, 16, main)
         torch.cuda.synchronize(dev)
         y.zero_()
+        x.zero_()
         torch.cuda.synchronize(dev)
         try:
             # (1) gathered: a ~10 ms kernel, then the value the CPU must see with the word
             torch.cuda._sleep(20_000_000)
             y.fill_(7)
             h_out.copy_(y, non_blocking=True)
+            probe = None
+            if self.region is not None:
+                # the process proxy's staging path: a driver D2H into the shared region, read by another process
+                probe = self.region.probe_tensor()
+                probe.zero_()
+                self.region.d2h(probe, y)
             self.gathered(1, main)
             if not self.wait_gathered(1, timeout_s):
                 return False, "gathered word not written within the timeout"
             if int(h_out.numpy()[0]) != 7:
                 return False, f"CPU saw gathered before the copied data ({int(h_out.numpy()[0])})"
-            # (2) released: the stream parks; the CPU writes the input, then releases
+            if probe is not None and int(probe.numpy()[0]) != 7:
+                return False, f"CPU saw gathered before the region copy ({int(probe.numpy()[0])})"
+            # (2) released: the stream parks; the CPU publishes the reply
             self.wait_release(1, main)
-            x.copy_(h_in, non_blocking=True)
+            self.copy_reply(x, 16, main)
+            self.consumed(1, main)
             done = torch.cuda.Event()
             done.record(main)
             time.sleep(0.02)
             if done.query():
                 return False, "stream passed the wait before the release"
-            h_in.numpy()[0] = 9
-            self.release(1)
+            if not self.publish(1, np.array([9, 8, 7, 6], dtype=np.int32)):
+                return False, "publish did not claim round 1"
             t0 = time.monotonic()
             while not done.query():
                 if time.monotonic() - t0 > timeout_s:
                     return False, "stream did not pass the wait within the timeout after the release"
                 time.sleep(0.001)
-            if int(x.item()) != 9:
-                return False, f"stream copied {int(x.item())} after the release, expected 9"
+            got = x.tolist()
+            if got != [9, 8, 7, 6]:
+                return False, f"stream copied {got} after the release, expected [9, 8, 7, 6]"
+            if not self.reply_consumed(1):
+                return False, "stream did not acknowledge the reply copy (consumed word)"
             return True, "ok"
         finally:
-            self.release(0x7FFFFFFF)           # never leave the stream parked
-            torch.cuda.synchronize(dev)
+            self.release(0x7FFFFFFF)        # rescue: never leave the stream parked (a CPU store)
+            drained = torch.cuda.Event()
+            drained.record(main)
+            t0 = time.monotonic()
+            while not drained.query():
+                if time.monotonic() - t0 > max(5.0, 2 * timeout_s):
+                    raise StreamStuckError("the engine stream stayed parked after the host-word rescue: this device "
+                                           "does not observe host stores; the stream cannot be recovered")
+                time.sleep(0.001)
             self.reset()
 
     def close(self) -> None:
-        """Engine thread, after the proxy thread stopped."""
-        if self.page:
+        """Only after the round stopped and the stream drained."""
+        self.stop_watchdog()
+        if self.page and self.region is None:
             torch.cuda.synchronize(self.device)
-            self.drv.unregister(ctypes.c_void_p(self.page))
-            self.lib.dsv41_hf_free(ctypes.c_void_p(self.page))
-            self.page = 0
+            self.drv.unregister(_V(self.page))
+        HostFlagCore.close(self)
+
+
+def release_hand_off(sync=None, registered=None, shared=None) -> str | None:
+    """Undo a refused or abandoned async hand-off at startup, before any stream operation references it (S11 P-2):
+    stop the watchdog, unregister the process proxy's shared region from CUDA and unmap it (both fds and the mapping:
+    about 30 MiB, mlocked). Each argument is optional; the sync's own region and shared region are found from it.
+    After this the sync object must not be used again (its page address is cleared, so the atexit hook is a no-op).
+    Returns None, or why the mapping is still there (another view of it is alive; the caller logs it)."""
+    if sync is not None:
+        if registered is None and isinstance(getattr(sync, "region", None), RegisteredRegion):
+            registered = sync.region
+        if shared is None:
+            shared = getattr(sync, "shared", None)
+        sync.close()
+    if registered is not None:
+        if shared is None:
+            shared = registered.region
+        registered.unregister()
+    if shared is None or shared.closed:
+        return None
+    try:
+        shared.close()
+    except BufferError:
+        gc.collect()            # views held by a failed constructor's frames, freed with their exception
+        try:
+            shared.close()
+        except BufferError as e:
+            return f"shared region still mapped ({e})"
+    return None
 
 
 # ---------------------------------------------------------------------------------------------------- CPU stand-in
 
-class FakeHostFlagSync:
-    """CPU tests: "gathered" is immediate (CPU copies are synchronous) and the engine's "stream wait" blocks the
-    calling thread until the proxy released."""
+class CpuHostFlagSync(HostFlagCore):
+    """CPU tests: the real C words, publish, fail-all and watchdog; the "stream" is the calling thread. gathered() stores
+    the word at once (CPU copies are synchronous), wait_release() blocks the engine thread in the C wait (GIL released)
+    until released, copy_reply() copies the reply area into a CPU tensor."""
 
-    cuda_free_proxy = True
-
-    def __init__(self, timeout_s: float = 10.0):
-        self._g = 0
-        self._r = 0
-        self._cv = threading.Condition()
+    def __init__(self, lib_path: str = "", timeout_s: float = 10.0, region=None):
+        super().__init__(lib_path, spin_us=200, nap_us=20, page=region.page_addr if region is not None else 0)
         self.timeout_s = timeout_s
+        self.region = region
+        self.shared = region            # shmregion.SharedRegion (process proxy)
+
+    def d2h(self, dst: torch.Tensor, src: torch.Tensor) -> None:
+        dst.copy_(src)
 
     def gathered(self, value: int, stream=None) -> None:
-        with self._cv:
-            self._g = max(self._g, value)
-            self._cv.notify_all()
+        self.lib.dsv41_hf_release_max(_V(self.gathered_host), value & _M32)
 
     def wait_release(self, value: int, stream=None) -> None:
-        with self._cv:
-            if not self._cv.wait_for(lambda: self._r >= value, timeout=self.timeout_s):
-                raise StreamSyncError(f"fake wait for release {value} timed out (released {self._r})")
+        r = self.lib.dsv41_hf_wait_geq(_V(self.released_host), value & _M32, int(self.timeout_s * 1e9),
+                                       self.spin_ns, self.nap_ns)
+        if r != 0:
+            raise StreamSyncError(f"wait for release {value} timed out (words {self.values()})")
 
-    def wait_gathered(self, value: int, timeout_s: float) -> bool:
-        with self._cv:
-            return self._cv.wait_for(lambda: self._g >= value, timeout=timeout_s)
-
-    def release(self, value: int) -> None:
-        with self._cv:
-            self._r = max(self._r, value)
-            self._cv.notify_all()
-
-    def values(self) -> tuple[int, int]:
-        with self._cv:
-            return self._g, self._r
-
-    def reset(self) -> None:
-        with self._cv:
-            self._g = self._r = 0
+    def copy_reply(self, dst: torch.Tensor, nbytes: int | None = None, stream=None) -> None:
+        n = self.reply_bytes if nbytes is None else int(nbytes)
+        if dst.device.type != "cpu" or not dst.is_contiguous() or dst.numel() * dst.element_size() < n:
+            raise StreamSyncError(f"reply destination cannot take {n} bytes")
+        ctypes.memmove(dst.data_ptr(), self.reply_host, n)
 
     def describe(self) -> dict:
-        return {"mechanism": "fake"}
+        d = super().describe()
+        d["mechanism"] = "host_flags_cpu"
+        return d
 
     def self_test(self, timeout_s: float = 2.0) -> tuple[bool, str]:
-        return True, "fake"
+        return True, "cpu"
 
-    def close(self) -> None:
-        pass
+
+# name of the v1 CPU stand-in (tests, reviewers' probes)
+FakeHostFlagSync = CpuHostFlagSync

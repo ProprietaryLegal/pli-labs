@@ -680,8 +680,8 @@ class TPDrafter:
         self.ranks: list = [None] * tp
         for r in self.ALL:
             with torch.cuda.device(devs[r]):       # Triton launches on the current device, not the tensors'
-                self.ranks[r] = Rank(r, devs[r], ck, self.plan, slots, max_model_len, max_rows, markov_cache_rows,
-                                     tokens, tp, self.fuse_pairs)
+                self.ranks[r] = self._make_rank(r, devs[r], ck, slots, max_model_len, max_rows, markov_cache_rows,
+                                                tokens, tp)
         from .exl3.hostcopy import release_stage
         release_stage()
         if tp == 1:
@@ -690,7 +690,7 @@ class TPDrafter:
             self.comm = SoloComm()
             self.emulated = True                    # one graph holding the active rank
         else:
-            self.comm = EmuComm() if self.emulated else P2PComm(devs, 32 * s.hidden, s.vocab)
+            self.comm = EmuComm() if self.emulated else P2PComm(devs, self.comm_words(), s.vocab)
         self.shared_scratch = len(self.ALL) == 2 and devs[0] == devs[1]   # emulation: one coop scratch, two ranks
         self.graphs: dict = {}
         self.margin_graphs: dict = {}
@@ -701,6 +701,16 @@ class TPDrafter:
         self.load_seconds = time.time() - t0
 
     # ------------------------------------------------------------------------------------------ helpers
+    def _make_rank(self, r: int, dev: torch.device, ck: Checkpoint, slots: int, max_model_len: int, max_rows: int,
+                   markov_cache_rows: int, tokens, tp: int):
+        """Rank r's shards (subclasses with other weight representations override this; native/tp2_native.py)."""
+        return Rank(r, dev, ck, self.plan, slots, max_model_len, max_rows, markov_cache_rows, tokens, tp,
+                    self.fuse_pairs)
+
+    def comm_words(self) -> int:
+        """Largest all-reduce payload (fp32 words) the p2p buffers are sized for."""
+        return 32 * self.s.hidden
+
     def _each(self, R, fn) -> dict:
         out = {}
         for r in R:
@@ -973,9 +983,16 @@ class TPDrafter:
 
     def _replay(self, g: dict) -> None:
         order = (1, 0) if not self.emulated else (self.ALL[0],)
-        for r in order:
-            with torch.cuda.device(self.devs[r]):
-                g["graphs"][r].replay()
+        try:
+            if self.comm.real:
+                self.comm.pair._usable()
+            for r in order:
+                with torch.cuda.device(self.devs[r]):
+                    g["graphs"][r].replay()
+        except RuntimeError as error:
+            if self.comm.real:
+                self.comm.pair.poison(str(error))
+            raise
 
     def has_graph(self, B: int, k: int, n_out: int | None = None, margin: bool = False) -> bool:
         return (B, k, k if n_out is None else n_out) in (self.margin_graphs if margin else self.graphs)
@@ -1106,13 +1123,16 @@ class TP2Backend:
             self.log.critical("%d TP collective failures in a row: the pair is unusable", self.comm_errors_in_a_row)
             return False
         try:
-            wait_idle(self.m.devs, 30.0)
+            # The collective boundary refuses poisoned contexts before any CUDA call and drains every tracked
+            # stream. Keep the health interface independent of the concrete pair implementation (S10 fake/NCCL).
+            h = self.m.comm.headers() if self.m.comm.real else None
+            if h is None:
+                wait_idle(self.m.devs, 30.0)
             for d in dict.fromkeys(self.m.devs):
                 with torch.cuda.device(d):
                     if float((torch.ones(1, device=d) + 1).item()) != 2.0:
                         return False
             if self.m.comm.real:
-                h = self.m.comm.headers()
                 if h[0][2] or h[1][2] or h[0][0] != h[1][0]:
                     self.log.error("TP collectives left in error state %s: resetting both ranks", h)
                     self.m.comm.reset()
@@ -1178,7 +1198,8 @@ class TP2Backend:
             h = self.m.comm.headers()             # bounded waits (TimeoutError -> the core classifies the backend)
             self.m.comm.reset()
             raise RuntimeError(f"TP collective failure in this step (rank headers {h}: epoch, done, error bits "
-                               f"1 timeout / 2 peer timeout / 4 bad id, error epoch, count); both ranks reset")
+                               f"1 timeout / 2 peer timeout / 4 bad id / 8 cancelled / 16 epoch exhausted, "
+                               f"error epoch, count); both ranks reset")
         self.comm_errors_in_a_row = 0
         margin = packed[:, 2 * N:3 * N].astype(np.float32) if want_margin else None
         return packed[:, :N].astype(np.int32), packed[:, N:2 * N].astype(np.float32), margin

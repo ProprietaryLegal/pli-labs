@@ -5,8 +5,13 @@ on two DGX Spark (GB10) nodes with an x86 offload host. It extends the
 [remote 3090 drafter](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) from one card to an NVLinked
 pair of RTX 3090s. Overview: [DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload).
 
-**Status: proven in-engine (−2.5 % per decode round, interleaved A/B); under independent review; not yet the production
-default.**
+**Status (updated 2026-10-23):**
+- Proven in-engine on GB10. On its own it gives −0.6 to −2.6 % per decode round.
+- With the [async process proxy](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) it gives **−3.9 to
+  −6.5 % per round** against the one-card synchronous production setup, with time to first token at parity.
+- The illegal-address crash an earlier review reported is root-caused and fixed (below).
+- Not yet the production default: the switch-over checks are running now.
+
 
 Hugging Face entry: https://huggingface.co/ProprietaryLegal/dsv41-dspark-drafter-tp2-nvlink
 
@@ -40,7 +45,26 @@ PCIe peer copies would erase the gain. If one card does the job, use one card.
 
 ## Measured effect
 
-**In-engine, on the production serve.** D-kv6, two DGX Spark GB10, the
+**In-engine on GB10, window 4** (2026-10-23; fresh serves, direct per-step timer, p50 per request; one-card sync = the
+production setup at the time):
+
+| workload | one card, sync | two cards, sync | two cards + async process proxy |
+|---|---|---|---|
+| short × 3, step (ms) | 39.6 / 40.1 / 39.4 | 39.0 / 38.9 / 38.9 (−1.8 %) | 37.1 / 37.4 / 36.9 (**−6.5 %**) |
+| 32K × 3, step (ms) | 41.2 / 42.2 / 42.3 | 41.6 / 41.5 / 41.6 (−0.6 %) | 39.6 / 39.5 / 40.2 (**−4.5 %**) |
+| 32K, 3 concurrent, step (ms) | 75.9 / 76.1 / 76.1 | 74.9 / 75.1 / 74.8 (−1.4 %) | 72.8 / 73.5 / 73.0 (**−3.9 %**) |
+| 150K × 2, step (ms) | 41.5 / 42.2 | 40.7 / 41.4 (−1.9 %) | 39.6 / 39.8 (**−5.0 %**) |
+
+Worker step p50 2.55 ms, p99 3.47 ms, over 6,284 steps.
+
+**Per-card memory and power,** from 1 s samples (caps 325 W):
+
+| phase | card 0 | card 1 |
+|---|---|---|
+| load | 5,852 MiB / 146 W | 5,212 MiB / 141 W |
+| serving | 5,862 MiB / 124 W | 5,222 MiB / 122 W |
+
+**Earlier in-engine A/B, on the production serve.** D-kv6, two DGX Spark GB10, the
 [EXL3 2.75 bpw legal-weighted build](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-1017-EXL3-2.75bpw-LegalWeighted-DGX-Spark).
 Only the worker was swapped; TP2 and one-card were interleaved; step time is a direct per-step timer (gaps between SSE
 events), p50 per request:
@@ -73,11 +97,37 @@ events), p50 per request:
 - One-card vs TP2: drafts agree 1.000 at positions 0 and 900,000. Confidence is identical.
 - Power: pair peak 709.5 W, NVLink replay/recovery/CRC errors 0.
 
+## The illegal-address crash: root cause and fix
+
+An earlier independent review saw an illegal memory access in the first collective in some test sequences. We reproduced it
+on the real pair and found two separate causes. Both are now fixed.
+
+**1. Peer-mapped state carved from PyTorch's expandable segments.**
+- The collective's peer-accessed buffers came from the Torch caching allocator. With `expandable_segments` on, old code
+  crashed with Xid 31 on both cards.
+- The same old code passed with expandable segments off.
+- **Fix:** the peer state now gets its own `cudaMalloc` allocation outside the Torch allocator, made outside graph capture.
+  The fixed code passed two full create/use/destroy cycles with expandable segments on, leaving 0 bytes in the allocator.
+
+**2. A foreign capture stream.**
+- PyTorch 2.10's graph helper keeps a class-wide default capture stream. A TP2 capture on card 0 can seed it, and a later
+  one-card capture on card 1 then runs on a stream that belongs to the other device, so the capture is invalidated.
+- **Fix:** every capture site passes its own stream. The regression test passes on the pair.
+
+**Also checked on the pair:**
+- **Bad-ID refusal.** A bad id is now refused symmetrically on both ranks, and each collective waits for the peer's
+  consumption ack.
+- **Deliberate fault.** A null store faulted as intended (Xid 31). The pair was marked poisoned and reuse was refused; both
+  cards were healthy afterwards.
+- **Push collective vs a peer copy:** 68.7–100.8 µs vs 187–196 µs at 5–20 rows, exact on both ranks.
+
 ## Deploy
 
 1. Stop the one-card unit, then `code/dspark/worker/run/start_tp2.sh`. It refuses if either card is busy, installs the
    `--tp 2` unit (`Conflicts=` the one-card unit, same port) and waits for the ready line.
 2. Lower `VLLM_DSPARK_REMOTE_DRAFT_MS` by ~0.8 ms for the depth policy (it was calibrated on one card).
+3. For a production unit, build the p2p extension ahead of time (`code/dspark/worker/run/prod_tp2.sh build-p2p`, record
+   its sha256) and point `DSPARK_P2P_PREBUILT` at it. Units then never compile at start.
 
 Design and numbers: `code/dspark/worker/TP2.md`.
 
@@ -87,10 +137,10 @@ Run `stop_tp2.sh` and start the one-card unit. The engine reconnects within ~5 s
 
 ## Limits
 
-- −2.5 % per round on its own: below a 5 % promotion bar, but consistent across 1–3 streams and 32K–150K.
+- On its own, −0.6 to −2.6 % per round. The larger gain comes with async rounds, which hide the rest of the round.
 - Insert is ~0.1 ms slower than one card (host overhead).
-- Test-tool-only issue: building the one-card model on rank 1's card in the same process before TP2 causes an illegal
-  address in the first collective. The worker never does this. The root cause is under review.
+- Both cards are then in use for drafting. Pair tests and other GPU work need a maintenance window, during which the
+  one-card worker serves.
 
 ## Related entries
 

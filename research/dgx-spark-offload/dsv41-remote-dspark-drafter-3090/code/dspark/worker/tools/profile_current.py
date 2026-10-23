@@ -4,7 +4,7 @@ Run on x86host with the O2 environment and W1_GPU_OK. Records paired CPU timesta
 CUDA events for each complete insert + draft + reply-copy sample. No percentile
 subtraction. Eager traces and optional CUPTI runs are separate diagnostics, never
 subtracted from these critical-path measurements. Synthetic inputs and raw outputs
-stay in the local output directory. A single model is retained (<9 GiB process budget).
+stay in the local output directory. A single model is retained (<20 GiB W1b process budget).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 
-from .profile_support import expert_counts, require_gpu_window, summarize
+from .profile_support import PROCESS_LIMIT_MIB, expert_counts, require_gpu_window, summarize
 
 
 def main() -> None:
@@ -88,8 +88,8 @@ def main() -> None:
                                  text=True, capture_output=True, check=True).stdout
         own_mib = next(float(line.split(",")[1]) for line in process.splitlines()
                        if int(line.split(",")[0]) == os.getpid())
-        if own_mib >= 9 * 1024:
-            raise RuntimeError(f"W1 process exceeds 9-GiB ceiling: {own_mib} MiB")
+        if own_mib >= PROCESS_LIMIT_MIB:
+            raise RuntimeError(f"W1b process exceeds 20-GiB ceiling: {own_mib} MiB")
         provenance = {"pid": os.getpid(), "process_mib": own_mib, "device": torch.cuda.get_device_name(),
                       "torch": torch.__version__, "base": args.revision,
                       "sources": {name: hashlib.sha256((Path(__file__).parents[1] / name).read_bytes()).hexdigest()

@@ -38,6 +38,11 @@ path runs byte-identically). Every value is validated at startup; a bad value ra
                                   through two words in registered host memory (streamsync.HostFlagSync);
                                   the proxy thread makes no CUDA call. Self-tested at startup; falls back
                                   to the synchronous round with a warning. Default 0.
+  VLLM_DSPARK_REMOTE_ASYNC_PROXY  async mode: where the round's proxy runs. thread (default): a Python thread of the
+                                  engine process (needs the engine's GIL to publish). process: a torch-free child
+                                  process with its own interpreter (proxy_proc.py); the gather staging, the descriptor
+                                  ring and the hand-off words share one registered memfd region (shmregion.py), so the
+                                  success path never waits for the engine's GIL; the switch interval is not changed
   VLLM_DSPARK_REMOTE_HOSTFLAG_LIB async mode: path of libdsv41_hostflag.so (built from
                                   remote_dspark/hostflag.c). Default: VLLM_DSPARK_REMOTE_OFL_DIR's copy,
                                   else hostflag.c compiled with cc at startup.
@@ -45,8 +50,20 @@ path runs byte-identically). Every value is validated at startup; a bad value ra
                                   many us between checks after VLLM_DSPARK_REMOTE_ASYNC_SPIN_US of
                                   spinning (default 0: spin; one rank-0 core while a round is pending)
   VLLM_DSPARK_REMOTE_ASYNC_SPIN_US see ASYNC_NAP_US (default 1000)
-  VLLM_DSPARK_REMOTE_SWITCH_INTERVAL_US  async mode: Python GIL switch interval while the proxy thread
-                                  runs (default 500; the interpreter default is 5000; 0 = unchanged)
+  VLLM_DSPARK_REMOTE_ASYNC_WATCHDOG_MS async mode: a native watchdog fails and releases a round the engine stream
+                                  gathered but nobody released within this many ms (zero drafts for that round), so a
+                                  proxy thread that cannot run never parks the GPU for good. Default 0 = auto:
+                                  max(4 x VLLM_DSPARK_REMOTE_TIMEOUT_MS, 200)
+  VLLM_DSPARK_REMOTE_ASYNC_RESPAWNS  async process mode: new proxy processes the engine may start after its proxy died
+                                  or stalled (default 3; 0 = none: target-only rounds for the rest of the run). Between
+                                  the loss and the new proxy's start every round is target-only (zero drafts); the new
+                                  proxy starts with a new session, so the worker drops its windows and every slot is
+                                  re-announced (NEW_GEN). Spent: target-only rounds, one error log line
+  VLLM_DSPARK_REMOTE_ASYNC_RESPAWN_RESET_S  a proxy process that served this long restores the full respawn budget
+                                  (default 3600; 0 = never)
+  VLLM_DSPARK_REMOTE_SWITCH_INTERVAL_US  async thread mode: Python GIL switch interval while the proxy thread
+                                  runs (default 500; the interpreter default is 5000; 0 = unchanged); ignored with
+                                  ASYNC_PROXY=process
   VLLM_DSPARK_REMOTE_FUSED_GATHER auto (default: on CUDA, after a startup self-check against the torch
                                   path) | 0 | 1: the one-launch Triton row gather (fused_gather.py)
   VLLM_DSPARK_REMOTE_N_OUT        auto (default) | 0: ReqEntry.n_out (CONTRACT 6.3). auto = cap[n] of the dynamic
@@ -147,10 +164,19 @@ class RemoteConfig:
     hostflag_lib: str = ""
     async_nap_us: int = 0
     async_spin_us: int = 1000
+    async_watchdog_ms: int = 0
+    async_proxy: str = "thread"
+    async_respawns: int = 3
+    async_respawn_reset_s: int = 3600
     fused_gather: bool | None = None
     n_out: str = "auto"
     trip: int = 3
     cooldown: int = 256
+
+    @property
+    def watchdog_ms(self) -> int:
+        """The async watchdog deadline actually used."""
+        return self.async_watchdog_ms or max(4 * self.timeout_ms, 200)
 
     @property
     def keeps_local_drafter(self) -> bool:
@@ -208,6 +234,10 @@ class RemoteConfig:
             hostflag_lib=(env.get("VLLM_DSPARK_REMOTE_HOSTFLAG_LIB") or "").strip(),
             async_nap_us=_int(env, "VLLM_DSPARK_REMOTE_ASYNC_NAP_US", 0, lo=0),
             async_spin_us=_int(env, "VLLM_DSPARK_REMOTE_ASYNC_SPIN_US", 1000, lo=0),
+            async_watchdog_ms=_int(env, "VLLM_DSPARK_REMOTE_ASYNC_WATCHDOG_MS", 0, lo=0),
+            async_proxy=_choice(env, "VLLM_DSPARK_REMOTE_ASYNC_PROXY", "thread", ("thread", "process")),
+            async_respawns=_int(env, "VLLM_DSPARK_REMOTE_ASYNC_RESPAWNS", 3, lo=0),
+            async_respawn_reset_s=_int(env, "VLLM_DSPARK_REMOTE_ASYNC_RESPAWN_RESET_S", 3600, lo=0),
             fused_gather={"auto": None, "1": True, "0": False}[
                 _choice(env, "VLLM_DSPARK_REMOTE_FUSED_GATHER", "auto", ("auto", "0", "1"))],
             n_out=_choice(env, "VLLM_DSPARK_REMOTE_N_OUT", "auto", ("auto", "0")),

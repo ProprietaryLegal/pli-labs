@@ -26,6 +26,9 @@ def test_gate_and_uuid_are_both_required(tmp_path, monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
     with pytest.raises(RuntimeError, match="CUDA_VISIBLE_DEVICES"):
         require_gpu_window(marker)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-DRAFTER0-UUID")
+    with pytest.raises(RuntimeError, match="CUDA_VISIBLE_DEVICES"):
+        require_gpu_window(marker)
 
 
 def test_counts_include_unpopulated_experts():

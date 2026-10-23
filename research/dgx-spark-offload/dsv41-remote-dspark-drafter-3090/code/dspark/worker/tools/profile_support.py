@@ -7,7 +7,8 @@ from pathlib import Path
 from statistics import median
 from typing import Mapping, Sequence
 
-GPU_UUID = "GPU-DRAFTER0-UUID"
+GPU_UUID = "GPU-DRAFTER1-UUID"
+PROCESS_LIMIT_MIB = 20 * 1024
 
 
 def require_gpu_window(gate: Path | None = None) -> None:

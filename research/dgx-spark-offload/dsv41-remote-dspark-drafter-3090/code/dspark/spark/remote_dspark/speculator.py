@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import socket
+import weakref
 from typing import Any
 
 import numpy as np
@@ -36,7 +37,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 
 from . import wire
 from .config import RemoteConfig, apply_cost_overrides, n_out_table
-from .round import STATUS_OK, STATUS_ROUND_FAILED, RemoteRound
+from .round import STATUS_OK, STATUS_ROUND_FAILED, RemoteRound, make_remote_round
 from .stats import Stats
 
 logger = init_logger(__name__)
@@ -138,11 +139,21 @@ def _make_round(vllm_config: VllmConfig, device: torch.device, cfg: RemoteConfig
         tp.broadcast(t, src=0)
 
     strict = cfg.strict_start or cfg.on_fail == "raise"
-    sync = _make_stream_sync(cfg, device, stats) if rank == 0 else None
-    rnd = RemoteRound(cfg, hello, device=device, tp_rank=rank,
-                      broadcast_fn=bcast if tp.world_size > 1 else None, stats=stats,
-                      background=not strict, stream_sync=sync, n_out_by_reqs=n_out)
-    if rnd.client is not None:
+    sync = _make_stream_sync(cfg, device, stats, hello) if rank == 0 else None
+    # a process proxy that does not start: synchronous rounds unless strict (make_remote_round)
+    rnd = make_remote_round(cfg, hello, device=device, tp_rank=rank,
+                            broadcast_fn=bcast if tp.world_size > 1 else None, stats=stats,
+                            background=not strict, stream_sync=sync, n_out_by_reqs=n_out)
+    if rnd.proxy is not None:
+        # the proxy process owns the client; a strict start already connected there (or raised)
+        stats.set("n_out_reason", n_out_why)
+        rnd.proxy.publish_engine_stats(stats.snapshot())
+        logger.info("remote DSpark n_out: %s (%s)", n_out if n_out else "all N", n_out_why)
+        logger.info("remote DSpark (%s policy) rank 0 -> %s through proxy process pid %d; rank-0 "
+                    "buffers: %.1f MiB device, %.1f MiB shared region", cfg.policy, cfg.endpoint,
+                    rnd.proxy.pid, rnd.gatherer.device_bytes / 2**20,
+                    rnd.region.layout.size / 2**20)
+    elif rnd.client is not None:
         stats.set("n_out_reason", n_out_why)
         logger.info("remote DSpark n_out: %s (%s)", n_out if n_out else "all N", n_out_why)
         if strict:
@@ -157,30 +168,45 @@ def _make_round(vllm_config: VllmConfig, device: torch.device, cfg: RemoteConfig
     return rnd
 
 
-def _make_stream_sync(cfg: RemoteConfig, device: torch.device, stats: Stats):
-    """Async mode on rank 0: a self-tested HostFlagSync, or None (synchronous rounds)."""
+def _make_stream_sync(cfg: RemoteConfig, device: torch.device, stats: Stats, hello: wire.Hello):
+    """Async mode on rank 0: a self-tested HostFlagSync, or None (synchronous rounds). With the
+    process proxy its page lies in a shared region registered here (shmregion.py)."""
     if not cfg.async_mode:
         return None
     if torch.device(device).type != "cuda":
         logger.warning("remote DSpark async mode needs CUDA; synchronous rounds")
         stats.set("async_fallback_reason", "not cuda")
         return None
-    from .streamsync import HostFlagSync, StreamSyncError
+    from .streamsync import (HostFlagSync, RegisteredRegion, StreamStuckError, StreamSyncError,
+                             release_hand_off)
 
     sync = None
+    region = None
+    shared = None
     try:
+        if cfg.async_proxy == "process":
+            from .shmregion import RegionLayout, SharedRegion
+
+            shared = SharedRegion.create(RegionLayout.for_hello(hello))
+            region = RegisteredRegion(shared, torch.device(device))
         sync = HostFlagSync(torch.device(device), lib_path=cfg.hostflag_lib,
-                            spin_us=cfg.async_spin_us, nap_us=cfg.async_nap_us)
+                            spin_us=cfg.async_spin_us, nap_us=cfg.async_nap_us, region=region)
         ok, why = sync.self_test()
-    except (StreamSyncError, RuntimeError, OSError) as e:
+    except StreamStuckError:
+        # the stream is parked for good: falling back would hang the engine later (S9 F4); the region stays
+        # mapped and registered (the stream may still touch it)
+        raise
+    except (StreamSyncError, RuntimeError, OSError, ValueError) as e:
         ok, why = False, str(e)
     if not ok:
         logger.warning("remote DSpark async mode off (host-flag hand-off: %s); synchronous rounds", why)
         stats.set("async_fallback_reason", why)
-        if sync is not None:
-            sync.close()
+        # every refusal releases the watchdog, the registration and the region (S11 P-2: ~30 MiB mlocked)
+        leak = release_hand_off(sync, region, shared)
+        if leak:
+            logger.error("remote DSpark: after the refused hand-off the %s", leak)
         return None
-    if cfg.switch_interval_us > 0:
+    if cfg.switch_interval_us > 0 and cfg.async_proxy == "thread":
         import sys
 
         before = sys.getswitchinterval()
@@ -189,6 +215,16 @@ def _make_stream_sync(cfg: RemoteConfig, device: torch.device, stats: Stats):
                     sys.getswitchinterval() * 1e6)
     logger.info("remote DSpark async mode on (host-flag hand-off self-test passed; %s)", sync.describe())
     return sync
+
+
+def _close_round(rnd: RemoteRound) -> None:
+    """The speculator is gone (the model runner's shutdown drops it after a device synchronize) or the interpreter
+    exits: stop the round's proxy (process: stats flushed, stop word, bounded wait; thread: joined), fail every
+    pending round far ahead and close the worker connection (S11 P-6). A finalizer must not raise."""
+    try:
+        rnd.close()
+    except Exception as e:  # noqa: BLE001 -- the hand-off's own atexit fail-ahead still covers the stream
+        logger.warning("remote DSpark: closing the remote round at shutdown failed: %s", e)
 
 
 def init_remote_dspark_speculator(vllm_config: VllmConfig, device: torch.device):
@@ -241,6 +277,7 @@ class RemoteDSparkCapacitySpeculator(BaseSpeculator):
         self.pcp_manager = None
         self.stats = Stats()
         self.remote = _make_round(vllm_config, device, cfg, self.stats)
+        self._close = weakref.finalize(self, _close_round, self.remote)
 
     def init_cudagraph_manager(self, cudagraph_mode) -> None:
         return None
@@ -290,6 +327,7 @@ class RemoteDSparkLocalSpeculator(DSparkSpeculator):
         self.cfg = cfg
         self.stats = Stats()
         self.remote = _make_round(vllm_config, device, cfg, self.stats)
+        self._close = weakref.finalize(self, _close_round, self.remote)
         self._shadow = ShadowCompare(self.num_speculative_steps, self.stats) \
             if cfg.policy == "shadow" else None
 

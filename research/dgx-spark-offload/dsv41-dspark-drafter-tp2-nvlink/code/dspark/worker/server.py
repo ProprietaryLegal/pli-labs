@@ -399,7 +399,7 @@ class DraftCore:
 class GpuBackend:
     """Rows -> window KV and drafts on the 3090 through model.DSparkDrafter."""
 
-    def __init__(self, model, max_rows: int, row_bytes: int, graphs: bool = True):
+    def __init__(self, model, max_rows: int, row_bytes: int, graphs: bool = True, graph_reply: bool = False):
         import torch
 
         self.torch = torch
@@ -412,6 +412,9 @@ class GpuBackend:
         self.copy_done = torch.cuda.Event()      # the last H2D out of stage_buf (it is reused by the next flush)
         self.copy_done.record()
         self.graphs = graphs
+        if graph_reply and not graphs:
+            raise ValueError("graph_reply requires CUDA graphs")
+        self.graph_reply = graph_reply
         self.n_flush_rows = 0
         self.max_model_len = model.max_model_len
 
@@ -478,16 +481,23 @@ class GpuBackend:
         t = torch.from_numpy(host).to(self.dev, non_blocking=True)
         slots, anchors, last, lo = t[:, 0], t[:, 1], t[:, 2], t[:, 3]
         mg = None
+        packed = None
         if self.graphs and self.m.has_graph(B, N, n, margin=want_margin):
-            out = self.m.draft_graphed(slots, anchors, last, N, ctx_lo=lo, n_out=n, margin=want_margin)
-            ids, conf = out[0][:B], out[1][:B]
-            mg = out[2][:B] if want_margin else None
+            out = self.m.draft_graphed(slots, anchors, last, N, ctx_lo=lo, n_out=n, margin=want_margin,
+                                      packed_reply=self.graph_reply)
+            if self.graph_reply:
+                packed = out[0]
+            else:
+                ids, conf = out[0][:B], out[1][:B]
+                mg = out[2][:B] if want_margin else None
         elif want_margin:
             ids, conf, mg = self.m.draft_with_margin(slots, anchors, last, N, ctx_lo=lo, n_out=n)
         else:
             ids, conf = self.m.draft(slots, anchors, last, N, ctx_lo=lo, n_out=n)
-        parts = [ids.to(torch.float64), conf.to(torch.float64)] + ([mg.to(torch.float64)] if want_margin else [])
-        packed = torch.cat(parts, 1).cpu().numpy()                                   # one D2H + sync
+        if packed is None:
+            parts = [ids.to(torch.float64), conf.to(torch.float64)] + ([mg.to(torch.float64)] if want_margin else [])
+            packed = torch.cat(parts, 1)
+        packed = packed.cpu().numpy()                                             # one D2H + sync
         margin = packed[:, 2 * N:].astype(np.float32) if want_margin else None
         return packed[:, :N].astype(np.int32), packed[:, N:2 * N].astype(np.float32), margin
 
@@ -709,10 +719,12 @@ def build_core(root: str, graphs: bool = True, tp: int = 1, max_model_len: int =
     model = DSparkDrafter(ck, dev, slots=8, max_model_len=max_model_len)
     exp = expected_hello(bytes.fromhex(ident["drafter_identity"]), bytes.fromhex(ident["markov_identity"]),
                          max_model_len=max_model_len)
+    graph_reply = os.environ.get("DSPARK_GRAPH_REPLY", "0") == "1"
     if graphs:
         model.capture(batch_sizes=tuple(range(1, exp.max_slots + 1)), ks=(exp.num_spec,),
-                      insert_rows=(8, 16, 32, 64, 128), n_outs=tuple(range(1, exp.num_spec + 1)))
-    backend = GpuBackend(model, exp.max_rows_per_step, exp.row_bytes, graphs=graphs)
+                      insert_rows=(8, 16, 32, 64, 128), n_outs=tuple(range(1, exp.num_spec + 1)),
+                      pack_reply=graph_reply)
+    backend = GpuBackend(model, exp.max_rows_per_step, exp.row_bytes, graphs=graphs, graph_reply=graph_reply)
     core = DraftCore(exp, backend)
     log.info("worker ready in %.1f s: drafter_identity %s, markov_identity %s, %.2f GiB reserved", time.time() - t0,
              ident["drafter_identity"], ident["markov_identity"], torch.cuda.memory_reserved(dev) / 2**30)

@@ -16,7 +16,23 @@ soak:    N rounds, pipelined (the engine thread runs up to --depth rounds ahead 
          while rounds are parked, injected worker delays past the timeout, dropped replies and worker restarts
          (resyncs). Every usable draft must equal the fake drafter over the exact window (bit-exact ids and
          confidences); failed requests must carry zeros.
+gilwait: S9 P1 on the GPU. Every --gil-every-th round, right after submitting it, the engine thread waits for the
+         parked stream inside a native call that HOLDS the GIL (cuStreamSynchronize through ctypes.PyDLL, as a pybind11
+         extension launch without gil_scoped_release would). The proxy cannot run; the v2 native watchdog must fail and
+         release that round within its deadline (zero drafts), and every other round must stay bit-exact.
 selftest: the hand-off's own startup self-test only.
+
+--proxy process (lane R2): the same modes with the out-of-process proxy (VLLM_DSPARK_REMOTE_ASYNC_PROXY=process): the
+         hand-off page, gather staging and descriptor ring in one registered shared region, the round in a torch-free
+         child process. gilwait then expects the opposite of the thread proxy: the child publishes while the engine
+         thread holds the GIL, so the GIL-held rounds complete normally (no watchdog fire, bit-exact drafts). Use
+         --worker-proc there: a worker thread in this process would itself need the GIL the engine thread holds.
+--kill-proxy-every K (lane R3, process proxy): SIGKILL the proxy process every K rounds; the engine respawns it
+         (S11 P-4: event-drained word reset, new session). Requests in flight across a respawn are then checked
+         against the window gathered since (their first live round under the new proxy), new ones against their whole
+         window; every usable draft must still be bit-exact.
+GPU protocol (2026-10-23): run under `flock ~/dsv41-offload/locks/gpu-DRAFTER1.lock` with CUDA_VISIBLE_DEVICES set to
+         the development card; --allow-device names the accepted UUID prefix.
 """
 
 from __future__ import annotations
@@ -109,11 +125,27 @@ def setup(args):
            "VLLM_DSPARK_REMOTE_BACKOFF_MS": "2", "VLLM_DSPARK_REMOTE_BACKOFF_MAX_MS": "4",
            "VLLM_DSPARK_REMOTE_LOG_EVERY": "0", "VLLM_DSPARK_REMOTE_STATS_FILE": "",
            "VLLM_DSPARK_REMOTE_ASYNC": "1"}
+    if args.watchdog_ms:
+        env["VLLM_DSPARK_REMOTE_ASYNC_WATCHDOG_MS"] = str(args.watchdog_ms)
+    if args.proxy == "process":
+        env["VLLM_DSPARK_REMOTE_ASYNC_PROXY"] = "process"
+        env["VLLM_DSPARK_REMOTE_STATS_FILE"] = os.path.join(
+            os.environ.get("TMPDIR", "/tmp"), f"r2-gpu-harness-{os.getpid()}.json")
+    if args.spin_us is not None:
+        env["VLLM_DSPARK_REMOTE_ASYNC_SPIN_US"] = str(args.spin_us)
+    if args.nap_us is not None:
+        env["VLLM_DSPARK_REMOTE_ASYNC_NAP_US"] = str(args.nap_us)
     return sim, wire, cfgmod, mw, rmod, ss, hello, env
 
 
-def make_sync(ss, dev, args):
-    if hasattr(ss, "HostFlagSync"):
+def make_sync(ss, dev, args, hello=None):
+    if args.proxy == "process":
+        shm = importlib.import_module("remote_dspark.shmregion")
+        region = ss.RegisteredRegion(shm.SharedRegion.create(shm.RegionLayout.for_hello(hello())), dev)
+        sync = ss.HostFlagSync(dev, lib_path=args.hostflag_lib, spin_us=args.spin_us if args.spin_us is not None
+                               else 1000, nap_us=args.nap_us or 0, region=region)
+        impl = "host_flags + process proxy (shared region)"
+    elif hasattr(ss, "HostFlagSync"):
         sync = ss.HostFlagSync(dev, lib_path=args.hostflag_lib)
         impl = "host_flags"
     else:
@@ -156,14 +188,20 @@ def churn(sim, eng, rng):
                 eng.slots[slot] = None
 
 
-def expected(sim, mw, eng, sd):
-    """Per batch row: None (no draft needed) or (ids, conf) the worker must return."""
+def expected(sim, mw, eng, sd, since=None):
+    """Per batch row: None (no draft needed) or (ids, conf) the worker must return. since: req_id -> p0 for requests in
+    flight across a proxy respawn: their window holds only rows gathered under the new proxy, i.e. from the lowest first
+    position of their rounds since (a re-add replays from below and extends it down)."""
     out = []
     for i, r in enumerate(sd.reqs):
         if not sd.need_draft[i]:
             out.append(None)
-        else:
-            out.append(mw.fake_draft(eng.expected_window(r), r.anchor, r.computed, sim.N, sim.VOCAB))
+            continue
+        win = eng.expected_window(r)
+        p = (since or {}).get(r.req_id)
+        if p is not None:
+            win = [(pos, b) for pos, b in win if pos >= p]
+        out.append(mw.fake_draft(win, r.anchor, r.computed, sim.N, sim.VOCAB))
     return out
 
 
@@ -192,12 +230,57 @@ def verify(sim, layout, snap: np.ndarray, n: int, exp) -> tuple[int, int, int]:
     return checked, zeros, status
 
 
+def stats_of(rnd) -> dict:
+    """The round's stats: the shared object (thread proxy) or the proxy process's file (process proxy)."""
+    if getattr(rnd, "proxy", None) is None:
+        return rnd.stats.snapshot()
+    rnd.write_stats()
+    with open(rnd.cfg.stats_file) as f:
+        return json.load(f)
+
+
 def wait_ready(rnd, s=5.0):
     t = time.monotonic() + s
+    if getattr(rnd, "proxy", None) is not None:
+        while stats_of(rnd)["counters"].get("hellos", 0) < 1:
+            if time.monotonic() > t:
+                raise SystemExit("worker connection not ready (process proxy)")
+            time.sleep(0.02)
+        return
     while not rnd.client.ready and time.monotonic() < t:
         time.sleep(0.002)
     if not rnd.client.ready:
         raise SystemExit("worker connection not ready")
+
+
+WORKER_MAIN = """
+import sys, time
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+import sim
+from remote_dspark import wire
+from remote_dspark.mock_worker import TcpStubServer, WorkerCore
+h = wire.Hello(hidden=sim.H, row_bytes=sim.N_TAPS * sim.H * 2, drafter_identity=bytes(range(32)))
+srv = TcpStubServer(WorkerCore(h), "127.0.0.1", 0).start()
+srv.core.inject.delay_ms = float(sys.argv[3])
+print(srv.port, flush=True)
+sys.stdin.read()
+srv.stop()
+"""
+
+
+class WorkerProc:
+    """The reference worker in a process of its own (no GIL shared with the engine thread)."""
+
+    def __init__(self, args, delay_ms: float):
+        import subprocess
+
+        self.p = subprocess.Popen([sys.executable, "-c", WORKER_MAIN, args.tests, args.pkg, str(delay_ms)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.port = int(self.p.stdout.readline())
+
+    def stop(self):
+        self.p.stdin.close()
+        self.p.wait(timeout=10)
 
 
 # ------------------------------------------------------------------------------------------- modes
@@ -206,14 +289,24 @@ def run(args):
     dev = torch.device("cuda", 0)
     torch.cuda.set_device(dev)
     sim, wire, cfgmod, mw, rmod, ss, hello, env = setup(args)
-    sync, impl = make_sync(ss, dev, args)
-    result = {"impl": impl, "pkg": args.pkg, "mode": args.mode, "device": torch.cuda.get_device_name(dev)}
+    sync, impl = make_sync(ss, dev, args, hello)
+    result = {"impl": impl, "pkg": args.pkg, "mode": args.mode, "proxy": args.proxy,
+              "device": torch.cuda.get_device_name(dev)}
     if args.mode == "selftest":
         result["ok"] = True
         return result
-    srv = mw.TcpStubServer(mw.WorkerCore(hello()), "127.0.0.1", 0).start()
+    wproc = None
+    if args.worker_proc:
+        if args.mode == "soak":
+            raise SystemExit("--worker-proc: soak injects faults into an in-process worker")
+        wproc = WorkerProc(args, args.regress_delay_ms if args.mode in ("regress", "gilwait") else 0)
+        srv = None
+        port = wproc.port
+    else:
+        srv = mw.TcpStubServer(mw.WorkerCore(hello()), "127.0.0.1", 0).start()
+        port = srv.port
     e = dict(env)
-    e["VLLM_DSPARK_REMOTE"] = env["VLLM_DSPARK_REMOTE"].format(port=srv.port)
+    e["VLLM_DSPARK_REMOTE"] = env["VLLM_DSPARK_REMOTE"].format(port=port)
     cfg = cfgmod.RemoteConfig.from_env(e)
     rnd = rmod.RemoteRound(cfg, hello(), device=dev, tp_rank=0, broadcast_fn=None, background=True,
                            stream_sync=sync)
@@ -224,19 +317,34 @@ def run(args):
         eng.new_request(sl, prompt_len=400)
     rng = np.random.default_rng(args.seed)
     L = rnd.layout
-    depth = 1 if args.mode == "regress" else args.depth
+    depth = 1 if args.mode in ("regress", "gilwait") else args.depth
     snaps = [torch.zeros(L.size, dtype=torch.int32, device=dev) for _ in range(depth)]
     snaps_host = [torch.zeros(L.size, dtype=torch.int32, pin_memory=True) for _ in range(depth)]
     pending: list[tuple[int, int, list, int]] = []   # (round, n, expected, snapshot slot)
     totals = {"checked": 0, "zeros": 0, "ok": 0, "some_failed": 0, "failed": 0, "loads_parked": 0}
+    gil_dts: list[float] = []
+    gil_rounds: set[int] = set()
+    gil_status: list[int] = []
+    if args.mode == "gilwait":
+        cu_gil = ctypes.PyDLL("libcuda.so.1")      # PyDLL: the GIL stays held for the whole call
+        cu_gil.cuStreamSynchronize.argtypes = [ctypes.c_void_p]
+        cu_gil.cuStreamSynchronize.restype = ctypes.c_int
     t_start = time.monotonic()
     last_progress = t_start
     events: list[str] = []
+    since: dict[str, int] = {}                  # req_id -> lowest first position of its rounds under the current proxy
+    gen_seen: dict[str, int] = {}
+    if args.kill_proxy_every:
+        if args.proxy != "process":
+            raise SystemExit("--kill-proxy-every needs --proxy process")
+        rmod.RESPAWN_DELAY_S = args.respawn_delay_s
 
     def drain():
         torch.cuda.synchronize(dev)
         for (t, n, exp, k) in pending:
             c, z, st = verify(sim, L, snaps_host[k].numpy(), n, exp)
+            if t in gil_rounds:
+                gil_status.append(st)
             totals["checked"] += c
             totals["zeros"] += z
             totals[{0: "ok", 1: "some_failed", 2: "failed"}[st]] += 1
@@ -246,7 +354,7 @@ def run(args):
         churn(sim, eng, rng)
         if not any(eng.slots):
             eng.new_request(0)
-        if args.mode == "soak":
+        if args.mode == "soak" and not args.no_faults:
             if step % 400 == 200:
                 srv.core.inject.delay_ms = 400            # past the 150 ms timeout: a failed round
                 events.append(f"{step}: delay 400 ms")
@@ -258,17 +366,37 @@ def run(args):
             if step % 700 == 350:
                 srv.core.inject.drop_next_step = True
                 events.append(f"{step}: drop reply")
-        elif args.mode == "regress":
+        elif args.mode == "regress" and srv is not None:
             srv.core.inject.delay_ms = args.regress_delay_ms   # the proxy is mid-round when the module loads
+        if (args.kill_proxy_every and step % args.kill_proxy_every == args.kill_proxy_every // 2
+                and rnd._dead is None):
+            os.kill(rnd.proxy.pid, 9)
+            events.append(f"{step}: SIGKILL proxy {rnd.proxy.pid}")
+        before = {r.req_id: r.computed for r in eng.slots if r is not None}
         sd = eng.step()
-        exp = expected(sim, mw, eng, sd)
         sd = to_dev(sd, dev)
         k = step % depth
         res = rnd.run(sd.batch, sd.taps, sd.num_sampled, sd.num_rejected, sd.last_sampled, sd.next_prefill_tokens)
+        if args.kill_proxy_every and rnd._dead is None and rnd._generation:
+            for r in sd.reqs:               # under a respawned proxy a request's window starts at its rows gathered since
+                if gen_seen.get(r.req_id, 0) != rnd._generation:
+                    gen_seen[r.req_id] = rnd._generation
+                    since[r.req_id] = before[r.req_id]
+                else:
+                    since[r.req_id] = min(since[r.req_id], before[r.req_id])
+        exp = expected(sim, mw, eng, sd, since)
         snaps[k].copy_(res.bcast)                   # stream-ordered after the reply copy
         snaps_host[k].copy_(snaps[k], non_blocking=True)
         pending.append((step, sd.batch.num_reqs, exp, k))
-        load_now = (args.mode == "regress") or (args.load_every and step % args.load_every == args.load_every // 2)
+        if args.mode == "gilwait" and step % args.gil_every == args.gil_every // 2:
+            t0 = time.perf_counter()
+            r = cu_gil.cuStreamSynchronize(ctypes.c_void_p(torch.cuda.current_stream(dev).cuda_stream))
+            gil_dts.append(time.perf_counter() - t0)
+            gil_rounds.add(step)
+            if r != 0:
+                raise RuntimeError(f"cuStreamSynchronize failed: CUresult {r}")
+        load_now = args.mode != "gilwait" and (
+            (args.mode == "regress") or (args.load_every and step % args.load_every == args.load_every // 2))
         if load_now:
             if args.mode == "regress":
                 log(f"round {step + 1}: submitted, stream parked; loading a fresh module")
@@ -286,10 +414,14 @@ def run(args):
             last_progress = now
             log(f"step {step + 1}/{args.rounds}: {totals}")
     drain()
-    srv.core.inject.delay_ms = 0
-    snap = rnd.stats.snapshot()
+    if srv is not None:
+        srv.core.inject.delay_ms = 0
+    snap = stats_of(rnd)
     rnd.close()
-    srv.stop()
+    if srv is not None:
+        srv.stop()
+    if wproc is not None:
+        wproc.stop()
     loader.unload_all()
     elapsed = time.monotonic() - t_start
     lat = snap.get("latency", {})
@@ -301,7 +433,18 @@ def run(args):
                          "max_ms": round(durs[-1] * 1e3, 3) if durs else None},
         "latency_us": {k: lat.get(k) for k in ("rank0_round_us", "rank0_submit_us", "gather_us", "rtt_us")},
         "words": list(sync.values()) if hasattr(sync, "values") else None,
+        "watchdog": sync.watchdog_stats() if hasattr(sync, "watchdog_stats") else None,
+        "watchdog_events": snap.get("watchdog_events"),
+        "proxy_torch_loaded": snap.get("proxy_torch_loaded"),
+        "latency_us_all": {k: v for k, v in lat.items() if k.startswith(("rank0_", "proxy_parked", "rtt_us"))},
+        "async_respawns": snap.get("async_respawns"), "async_respawn": snap.get("async_respawn"),
+        "async_dead": snap.get("async_dead"), "async_proxy_losses": snap.get("async_proxy_losses"),
+        "async_stall_detection": snap.get("async_stall_detection"),
     })
+    if args.mode == "gilwait":
+        d = sorted(gil_dts)
+        result["gil_waits"] = {"n": len(d), "min_ms": round(d[0] * 1e3, 1), "p50_ms": round(d[len(d) // 2] * 1e3, 1),
+                               "max_ms": round(d[-1] * 1e3, 1), "statuses": sorted(set(gil_status))}
     return result
 
 
@@ -309,7 +452,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pkg", required=True)
     ap.add_argument("--tests", required=True)
-    ap.add_argument("--mode", choices=("regress", "soak", "selftest"), required=True)
+    ap.add_argument("--mode", choices=("regress", "soak", "gilwait", "selftest"), required=True)
+    ap.add_argument("--gil-every", type=int, default=5)
+    ap.add_argument("--watchdog-ms", type=int, default=0)
     ap.add_argument("--rounds", type=int, default=20)
     ap.add_argument("--depth", type=int, default=3)
     ap.add_argument("--load-every", type=int, default=37)
@@ -317,23 +462,34 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--hostflag-lib", default="")
     ap.add_argument("--out", default="")
-    ap.add_argument("--gate-file", default=os.path.expanduser("~/dsv41-offload/A2_GPU_OK"),
-                    help="GPU work only while this file exists (coordinator's permission); checked every 0.5 s")
+    ap.add_argument("--proxy", choices=("thread", "process"), default="thread")
+    ap.add_argument("--worker-proc", action="store_true", help="reference worker in its own process")
+    ap.add_argument("--spin-us", type=int, default=None)
+    ap.add_argument("--kill-proxy-every", type=int, default=0, help="process proxy: SIGKILL it every K rounds (R3)")
+    ap.add_argument("--no-faults", action="store_true",
+                    help="soak without worker faults (steady-state round overhead; module loads still run)")
+    ap.add_argument("--respawn-delay-s", type=float, default=0.05, help="with --kill-proxy-every: RESPAWN_DELAY_S")
+    ap.add_argument("--nap-us", type=int, default=None)
+    ap.add_argument("--allow-device", default="GPU-DRAFTER1",
+                    help="accepted CUDA_VISIBLE_DEVICES UUID prefix (one device)")
+    ap.add_argument("--gate-file", default="",
+                    help="optional: GPU work only while this file exists; checked every 0.5 s")
     args = ap.parse_args()
     vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    if not vis.startswith("GPU-DRAFTER0") or "," in vis:
-        raise SystemExit(f"refusing: CUDA_VISIBLE_DEVICES must be exactly GPU-DRAFTER0-... (is {vis!r})")
-    if not os.path.exists(args.gate_file):
-        raise SystemExit(f"refusing: {args.gate_file} does not exist (no GPU slot from the coordinator)")
+    if not vis.startswith(args.allow_device) or "," in vis:
+        raise SystemExit(f"refusing: CUDA_VISIBLE_DEVICES must be exactly {args.allow_device}-... (is {vis!r})")
+    if args.gate_file:
+        if not os.path.exists(args.gate_file):
+            raise SystemExit(f"refusing: {args.gate_file} does not exist (no GPU slot from the coordinator)")
 
-    def gate_watch():
-        while True:
-            time.sleep(0.5)
-            if not os.path.exists(args.gate_file):
-                log(f"GATE CLOSED: {args.gate_file} disappeared; exiting now")
-                os._exit(3)          # also works while the main thread is stuck in a driver call
+        def gate_watch():
+            while True:
+                time.sleep(0.5)
+                if not os.path.exists(args.gate_file):
+                    log(f"GATE CLOSED: {args.gate_file} disappeared; exiting now")
+                    os._exit(3)          # also works while the main thread is stuck in a driver call
 
-    threading.Thread(target=gate_watch, daemon=True, name="gate-watch").start()
+        threading.Thread(target=gate_watch, daemon=True, name="gate-watch").start()
     log(f"start {args.mode} pkg={args.pkg} rounds={args.rounds}")
     res = run(args)
     log("RESULT " + json.dumps(res))

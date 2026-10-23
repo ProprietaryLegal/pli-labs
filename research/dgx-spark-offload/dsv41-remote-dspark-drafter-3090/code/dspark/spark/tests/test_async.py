@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Async capacity mode (proxy thread + host-word hand-off), on CPU with FakeHostFlagSync.
+"""Async capacity mode (proxy thread + host-word hand-off), on CPU with CpuHostFlagSync.
 
-FakeHostFlagSync makes the engine thread's "stream wait" block until the proxy thread
-releases, which exercises the thread, the FIFO hand-off, the always-release rule, staged
-resync windows and the exactness of drafts. The CUDA side (stream memory ops on registered
+CpuHostFlagSync runs the real C words, publish and watchdog; the engine thread's "stream wait"
+blocks until the round is released, which exercises the thread, the FIFO hand-off, the
+always-release rule, staged resync windows and the exactness of drafts. The CUDA side (stream memory ops on registered
 host memory) is self-tested at startup (streamsync.HostFlagSync.self_test) and covered by
 tests_gpu/ on a real GPU."""
 
@@ -19,7 +19,7 @@ from remote_dspark.round import STATUS_OK, STATUS_ROUND_FAILED, RemoteRound
 import threading
 import sys
 
-from remote_dspark.streamsync import FakeHostFlagSync
+from remote_dspark.streamsync import CpuHostFlagSync
 
 import sim
 from test_round import cfg_for, churn, hello, run_step
@@ -35,7 +35,7 @@ def server():
 def make_async_round(port):
     cfg = cfg_for(port, VLLM_DSPARK_REMOTE_ASYNC="1")
     rnd = RemoteRound(cfg, hello(), device=torch.device("cpu"), tp_rank=0, broadcast_fn=None,
-                      background=True, stream_sync=FakeHostFlagSync(timeout_s=5))
+                      background=True, stream_sync=CpuHostFlagSync(timeout_s=5))
     t = time.monotonic() + 3
     while not rnd.client.ready and time.monotonic() < t:
         time.sleep(0.002)
@@ -222,11 +222,13 @@ def test_staged_resync_rows_equal_device_gather(server):
         rnd.resync_host[sl].copy_(g.ring[sl * W:(sl + 1) * W])
     spans = [(2, 250, 128), (0, 7, 30), (3, 1000, 1), (1, 120, 20)]
     total = sum(k for _, _, k in spans)
-    got = rnd._rows_from_staged(4, spans)
-    cpu_rows = g.rows_view(4, total).clone()
-    assert got == total
+    g.msg_np[:] = 0xA5
+    got = rnd._rows_from_staged(spans)
+    # built in the proxy's private buffer: the shared STEP staging is not written (S11 P-1)
+    assert (g.msg_np == 0xA5).all()
+    assert got.shape == (total, g.row_bytes) and not np.shares_memory(got, g.msg_np)
     assert g.gather_from_ring(4, spans) == total
-    assert torch.equal(cpu_rows.view(torch.int16), g.rows_view(4, total).view(torch.int16))
+    assert np.array_equal(got.reshape(-1), g.rows_view(4, total).view(torch.uint8).numpy().reshape(-1))
     rnd.close()
 
 
@@ -236,5 +238,5 @@ def test_close_releases_a_parked_round(server):
     eng.new_request(0, prompt_len=50)
     run_step(rnd, eng, eng.step())
     rnd.close()
-    g, r = rnd.sync.values()
-    assert r >= rnd.rounds and not rnd._thread.is_alive()
+    g, r, c = rnd.sync.values()
+    assert ((r - rnd.rounds) & 0xFFFFFFFF) < (1 << 31) and not rnd._thread.is_alive()   # r at/after rounds

@@ -4,12 +4,14 @@
 //   1. write this rank's payload into the peer's receive buffer (remote stores),
 //   2. __syncthreads, thread 0: __threadfence_system + st.release.sys of the peer's flag = epoch,
 //   3. thread 0 spins (ld.acquire.sys) until its own flag == epoch, bounded by a %globaltimer timeout,
-//   4. combine its own payload with the received one (L1 bypassed) and write the result.
+//   4. combine its own payload with the received one (L1 bypassed) and write the result,
+//   5. publish a consumption acknowledgment and wait for the peer's acknowledgment before completing.
 // Epochs: one counter per rank in its header, read at the start of every collective (epoch = counter + 1) and stored
 // by the last block to finish, so the next collective in stream order sees it. Both ranks run the same sequence of
 // collectives with the same grids, so their counters stay equal. Buffers and flags are double-buffered by epoch
 // parity: a rank reaches epoch e + 2 only after passing epoch e + 1's wait, which the peer signals only after it has
-// finished reading epoch e's buffer (stream order), so a parity slot is never overwritten while it is being read.
+// finished reading epoch e's buffer (stream order). Explicit acks also make peer validation errors visible before
+// a successful collective completes. Epoch zero is reserved: exhaustion fails closed instead of aliasing unused flags.
 // Timeout: the waiting block sets bit 0 of its own error word and bit 1 of the peer's, records the epoch, and goes on
 // with its OWN data only (never the receive buffer: after a missed signal it holds an older epoch's payload, e.g.
 // activations where an exchange expects token ids). Error state = local only: a collective that starts with a set
@@ -32,6 +34,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <limits>
 
 namespace {
 
@@ -42,6 +45,7 @@ constexpr int HDR_ERR_EPOCH = 3;  // epoch of the first timeout
 constexpr int HDR_COUNT = 4;      // collectives completed (diagnostics)
 constexpr int MAX_BLOCKS = 128;
 constexpr int64_t FLAGS_OFF = 256;                                  // bytes: flags [2][MAX_BLOCKS] u32
+constexpr int64_t ACKS_OFF = 1536;                                  // bytes: consumed [2][MAX_BLOCKS] u32
 constexpr int64_t RECV_OFF = 4096;                                  // bytes: recv [2][max_words] u32
 constexpr int THREADS = 512;
 
@@ -72,6 +76,8 @@ struct Ctx {
   uint32_t* peer_hdr;
   uint32_t* own_flags;   // [2][MAX_BLOCKS]
   uint32_t* peer_flags;
+  uint32_t* own_acks;
+  uint32_t* peer_acks;
   uint32_t* own_recv;    // [2][max_words]
   uint32_t* peer_recv;
   int64_t max_words;
@@ -84,6 +90,8 @@ __device__ __forceinline__ Ctx make_ctx(char* own, char* peer, int64_t max_words
   c.peer_hdr = reinterpret_cast<uint32_t*>(peer);
   c.own_flags = reinterpret_cast<uint32_t*>(own + FLAGS_OFF);
   c.peer_flags = reinterpret_cast<uint32_t*>(peer + FLAGS_OFF);
+  c.own_acks = reinterpret_cast<uint32_t*>(own + ACKS_OFF);
+  c.peer_acks = reinterpret_cast<uint32_t*>(peer + ACKS_OFF);
   c.own_recv = reinterpret_cast<uint32_t*>(own + RECV_OFF);
   c.peer_recv = reinterpret_cast<uint32_t*>(peer + RECV_OFF);
   c.max_words = max_words;
@@ -96,12 +104,35 @@ __device__ __forceinline__ Ctx make_ctx(char* own, char* peer, int64_t max_words
 __device__ __forceinline__ uint32_t begin(const Ctx& c, bool* degraded) {
   __shared__ uint32_t s_epoch, s_err;
   if (threadIdx.x == 0) {
-    s_epoch = ld_volatile(c.own_hdr + HDR_EPOCH) + 1u;
-    s_err = ld_volatile(c.own_hdr + HDR_ERROR);
+    const uint32_t previous = ld_acquire_sys(c.own_hdr + HDR_EPOCH);
+    s_epoch = previous == UINT32_MAX ? previous : previous + 1u;
+    if (previous == UINT32_MAX) {
+      atomicOr_system(c.own_hdr + HDR_ERROR, 16u);
+      atomicOr_system(c.peer_hdr + HDR_ERROR, 16u);
+    }
+    s_err = ld_acquire_sys(c.own_hdr + HDR_ERROR);
   }
   __syncthreads();
   *degraded = s_err != 0u;
   return s_epoch;
+}
+
+// Only local elapsed time is compared: %globaltimer values from different GPUs are never exchanged.
+// Cancellation/error is sticky until a host-confirmed idle reset, so neither a delayed publisher nor a new graph
+// replay can turn a failed generation into success.
+__device__ __forceinline__ bool wait_epoch(const Ctx& c, const uint32_t* flag, uint32_t epoch) {
+  const uint64_t start = globaltimer();
+  while (true) {
+    if (ld_acquire_sys(c.own_hdr + HDR_ERROR)) return false;
+    if (ld_acquire_sys(flag) == epoch) return true;
+    if (globaltimer() - start > (uint64_t)c.timeout_ns) {
+      if (atomicOr_system(c.own_hdr + HDR_ERROR, 1u) == 0u)
+        st_release_sys(c.own_hdr + HDR_ERR_EPOCH, epoch);
+      atomicOr_system(c.peer_hdr + HDR_ERROR, 2u);
+      return false;
+    }
+    __nanosleep(32);
+  }
 }
 
 // after this block's remote stores: signal the peer, wait for the peer's signal. Returns (in every thread) whether the
@@ -113,23 +144,10 @@ __device__ __forceinline__ bool handshake(const Ctx& c, uint32_t epoch, bool deg
   __syncthreads();
   if (threadIdx.x == 0) {
     const int p = epoch & 1u;
-    int ok = 1;
     __threadfence_system();
     st_release_sys(c.peer_flags + p * MAX_BLOCKS + blockIdx.x, epoch);
     const uint32_t* f = c.own_flags + p * MAX_BLOCKS + blockIdx.x;
-    if (ld_acquire_sys(f) != epoch) {
-      const uint64_t t0 = globaltimer();
-      while (ld_acquire_sys(f) != epoch) {
-        if (globaltimer() - t0 > (uint64_t)c.timeout_ns) {
-          if (atomicOr(c.own_hdr + HDR_ERROR, 1u) == 0u) c.own_hdr[HDR_ERR_EPOCH] = epoch;
-          atomicOr_system(c.peer_hdr + HDR_ERROR, 2u);
-          ok = 0;
-          break;
-        }
-        __nanosleep(32);
-      }
-    }
-    s_ok = ok;
+    s_ok = wait_epoch(c, f, epoch);
   }
   __syncthreads();
   return s_ok != 0;
@@ -138,14 +156,23 @@ __device__ __forceinline__ bool handshake(const Ctx& c, uint32_t epoch, bool deg
 // a received id outside [0, vocab): refuse it (error bit 2), keep the rank's own candidate
 __device__ __forceinline__ bool id_ok(const Ctx& c, int64_t id, int64_t vocab) {
   if (id >= 0 && id < vocab) return true;
-  atomicOr(c.own_hdr + HDR_ERROR, 4u);
+  atomicOr_system(c.own_hdr + HDR_ERROR, 4u);
+  atomicOr_system(c.peer_hdr + HDR_ERROR, 4u);
   return false;
 }
 
 // the last block to finish publishes the epoch for the next collective in stream order
-__device__ __forceinline__ void finish(const Ctx& c, uint32_t epoch) {
+__device__ __forceinline__ void finish(const Ctx& c, uint32_t epoch, bool received) {
+  // All consumer reads and mirrored error stores precede the acknowledgment. No receive buffer can be reused
+  // while a peer still reads it. Failed rounds drain locally and the host refuses their outputs.
+  __threadfence_system();
   __syncthreads();
   if (threadIdx.x == 0) {
+    if (received) {
+      const int p = epoch & 1u;
+      st_release_sys(c.peer_acks + p * MAX_BLOCKS + blockIdx.x, epoch);
+      (void)wait_epoch(c, c.own_acks + p * MAX_BLOCKS + blockIdx.x, epoch);
+    }
     __threadfence();
     const uint32_t d = atomicAdd(c.own_hdr + HDR_DONE, 1u);
     if (d == gridDim.x - 1) {
@@ -186,7 +213,7 @@ __global__ void __launch_bounds__(THREADS) ar_sum_kernel(const float4* __restric
       reinterpret_cast<float4*>(out)[i] = s;
     }
   }
-  finish(c, epoch);
+  finish(c, epoch, ok);
 }
 
 // combine of an argmax exchange: rank 0's (v0, i0) vs rank 1's (v1, i1), ties to rank 0 (the lower ids); a failed
@@ -226,7 +253,7 @@ __global__ void xchg_argmax_kernel(const float* __restrict__ val, const int64_t*
   }
   const bool ok = handshake(c, epoch, degraded);
   if (t < B) out[t * out_stride + col] = pick_of(c, ok, c.own_recv + p * max_words + 4 * t, mv, mi, vocab, is_rank0);
-  finish(c, epoch);
+  finish(c, epoch, ok);
 }
 
 // Fused Markov step: per row b, the shard's best (value, index) over the block partials of the cached or uncached
@@ -270,7 +297,7 @@ __global__ void __launch_bounds__(128) xchg_markov_kernel(
   const bool ok = handshake(c, epoch, degraded);
   if (warp < B && lane == 0)
     out[warp * out_stride + col] = pick_of(c, ok, c.own_recv + p * max_words + 4 * warp, mv, mi, vocab, is_rank0);
-  finish(c, epoch);
+  finish(c, epoch, ok);
 }
 
 // payload per row: [top1 bits, top2 bits, idx lo, idx hi]
@@ -323,7 +350,7 @@ __global__ void xchg_margin_kernel(const float* __restrict__ top2, const int64_t
     out[t * out_stride + col] = pick;
     mg[t * mg_stride + col] = top - second;
   }
-  finish(c, epoch);
+  finish(c, epoch, ok);
 }
 
 char* ptr(int64_t p) { return reinterpret_cast<char*>(p); }
@@ -336,13 +363,55 @@ void check_state(const torch::Tensor& st, int64_t max_words) {
   TORCH_CHECK(st.numel() >= RECV_OFF + 2 * max_words * 4, "p2p: state too small for ", max_words, " words");
 }
 
+void check_devices(const torch::Tensor& base, std::initializer_list<torch::Tensor> tensors) {
+  for (const auto& t : tensors)
+    TORCH_CHECK(t.device() == base.device(), "p2p: every tensor must be on ", base.device(), ", got ", t.device());
+}
+
+__global__ void cancel_kernel(char* state) {
+  atomicOr_system(reinterpret_cast<uint32_t*>(state) + HDR_ERROR, 8u);
+}
+
 }  // namespace
 
-int64_t state_bytes(int64_t max_words) { return RECV_OFF + 2 * max_words * 4; }
+int64_t state_bytes(int64_t max_words) {
+  TORCH_CHECK(max_words > 0 && max_words % 4 == 0 &&
+              max_words <= (std::numeric_limits<int64_t>::max() - RECV_OFF) / 8,
+              "p2p: state size needs a positive, 4-aligned, non-overflowing max_words");
+  return RECV_OFF + 2 * max_words * 4;
+}
+
+// Peer state must be a legacy CUDA allocation. exllamav3's Python import changes the Torch allocator at runtime
+// (without setting PYTORCH_CUDA_ALLOC_CONF). Torch expandable/VMM allocations are not mapped by
+// cudaDeviceEnablePeerAccess. A tensor from that allocator is therefore not a valid raw peer-write destination.
+// Own this small block independently of the model allocator, on the exact device, for its entire graph lifetime.
+torch::Tensor allocate_state(int64_t max_words, int64_t device) {
+  const int64_t bytes = state_bytes(max_words);
+  c10::cuda::CUDAGuard guard((c10::DeviceIndex)device);
+  cudaStreamCaptureStatus status;
+  C10_CUDA_CHECK(cudaStreamIsCapturing(at::cuda::getCurrentCUDAStream(), &status));
+  TORCH_CHECK(status == cudaStreamCaptureStatusNone, "p2p: allocate state outside capture");
+  void* data = nullptr;
+  C10_CUDA_CHECK(cudaMalloc(&data, bytes));
+  auto tensor = torch::from_blob(data, {bytes}, [device](void* p) {
+    // A poisoned context is never cleared here. Report a failed free; process exit releases its remaining memory.
+    try {
+      c10::cuda::CUDAGuard guard((c10::DeviceIndex)device);
+      const cudaError_t error = cudaFree(p);
+      if (error != cudaSuccess) TORCH_WARN("p2p state free failed; restart required: ", cudaGetErrorString(error));
+    } catch (const std::exception& error) {
+      TORCH_WARN("p2p state device guard failed during teardown; restart required: ", error.what());
+    }
+  }, torch::TensorOptions().device(torch::kCUDA, device).dtype(torch::kUInt8));
+  C10_CUDA_CHECK(cudaMemsetAsync(data, 0, bytes, at::cuda::getCurrentCUDAStream()));
+  return tensor;
+}
 
 // cudaDeviceEnablePeerAccess(peer) from `dev`'s context; already enabled is fine
 void enable_peer(int64_t dev, int64_t peer) {
   c10::cuda::CUDAGuard g((c10::DeviceIndex)dev);
+  // Do not clear a pre-existing launch fault when handling the benign AlreadyEnabled status below.
+  C10_CUDA_CHECK(cudaPeekAtLastError());
   int can = 0;
   C10_CUDA_CHECK(cudaDeviceCanAccessPeer(&can, (int)dev, (int)peer));
   TORCH_CHECK(can, "p2p: device ", dev, " cannot access device ", peer);
@@ -354,8 +423,17 @@ void enable_peer(int64_t dev, int64_t peer) {
   C10_CUDA_CHECK(e);
 }
 
+void cancel(torch::Tensor own) {
+  c10::cuda::CUDAGuard g(own.device());
+  check_state(own, 4);
+  cancel_kernel<<<1, 1, 0, at::cuda::getCurrentCUDAStream()>>>(static_cast<char*>(own.data_ptr()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void reset(torch::Tensor own) {
   c10::cuda::CUDAGuard g(own.device());
+  check_state(own, 4);
+  C10_CUDA_CHECK(cudaPeekAtLastError());
   C10_CUDA_CHECK(cudaMemsetAsync(own.data_ptr(), 0, RECV_OFF, at::cuda::getCurrentCUDAStream()));
 }
 
@@ -363,6 +441,7 @@ void ar_sum(torch::Tensor x, torch::Tensor out, torch::Tensor own, int64_t peer,
             int64_t timeout_ns) {
   c10::cuda::CUDAGuard g(x.device());
   check_state(own, max_words);
+  TORCH_CHECK(peer != 0 && timeout_ns > 0, "p2p: null peer or nonpositive timeout");
   TORCH_CHECK(x.dtype() == torch::kFloat32 && x.is_contiguous() && out.is_contiguous(), "p2p.ar_sum: x fp32 contiguous");
   TORCH_CHECK(out.device() == x.device() && own.device() == x.device(), "p2p.ar_sum: devices");
   const int64_t n = x.numel();
@@ -388,6 +467,8 @@ void xchg_argmax(torch::Tensor val, torch::Tensor idx, int64_t v_off, int64_t vo
                  bool is_rank0, torch::Tensor own, int64_t peer, int64_t max_words, int64_t timeout_ns) {
   c10::cuda::CUDAGuard g(val.device());
   check_state(own, max_words);
+  check_devices(val, {idx, out, own});
+  TORCH_CHECK(peer != 0 && timeout_ns > 0 && vocab > 0, "p2p: peer/timeout/vocab");
   const int B = (int)val.numel();
   TORCH_CHECK(val.dtype() == torch::kFloat32 && idx.dtype() == torch::kInt64 && out.dtype() == torch::kInt64 &&
               val.is_contiguous() && idx.is_contiguous() && idx.numel() == B && B >= 1 && B <= 32 &&
@@ -404,6 +485,8 @@ void xchg_margin(torch::Tensor top2, torch::Tensor idx, int64_t v_off, int64_t v
                  int64_t timeout_ns) {
   c10::cuda::CUDAGuard g(top2.device());
   check_state(own, max_words);
+  check_devices(top2, {idx, out, mg, own});
+  TORCH_CHECK(peer != 0 && timeout_ns > 0 && vocab > 0, "p2p: peer/timeout/vocab");
   const int B = (int)idx.numel();
   TORCH_CHECK(top2.dtype() == torch::kFloat32 && top2.is_contiguous() && top2.numel() == 2 * B &&
               idx.dtype() == torch::kInt64 && idx.is_contiguous() && B >= 1 && B <= 32 &&
@@ -422,6 +505,9 @@ void xchg_markov(torch::Tensor prev, torch::Tensor slot_of_token, torch::Tensor 
                  int64_t col, bool is_rank0, torch::Tensor own, int64_t peer, int64_t max_words, int64_t timeout_ns) {
   c10::cuda::CUDAGuard g(vals_c.device());
   check_state(own, max_words);
+  check_devices(vals_c, {prev, slot_of_token, vals_u, idx_c, idx_u, out, own});
+  TORCH_CHECK(peer != 0 && timeout_ns > 0 && vals_c.dim() == 2 && vals_u.dim() == 2 &&
+              vals_c.size(1) > 0 && vals_u.size(1) > 0, "p2p.xchg_markov: peer/timeout/partials");
   const int B = (int)vals_c.size(0);
   TORCH_CHECK(prev.dtype() == torch::kInt64 && prev.dim() == 1 && prev.size(0) == B && slot_of_token.dtype() ==
               torch::kInt32 && slot_of_token.is_contiguous() && vals_c.dtype() == torch::kFloat32 &&
@@ -440,6 +526,8 @@ void xchg_markov(torch::Tensor prev, torch::Tensor slot_of_token, torch::Tensor 
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("allocate_state", &allocate_state);
+  m.def("cancel", &cancel);
   m.def("xchg_markov", &xchg_markov);
   m.def("state_bytes", &state_bytes);
   m.def("enable_peer", &enable_peer);

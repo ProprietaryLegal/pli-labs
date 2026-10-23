@@ -76,3 +76,41 @@ small-GEMM overhead matters. Compare complete transforms + matmul + downstream
 casts, not only GEMM throughput. Retain solely measured full-step winners with
 draft/confidence parity and a default-off switch. Every B1–4 saving and every
 materialisation parity result is **pending** because the GPU window is closed.
+
+## W1b measured update — second card, <20 GiB ceiling
+
+W1b replaces the original 9-GiB lane ceiling with 20 GiB on GPU-DRAFTER1.
+The live production worker remains on DRAFTER0, so its ~8.1 GiB is not subtracted
+from this card. W1b uses one model at a time and retains the original packed
+weights. Host RAM was301 GiB available / swap0 immediately before the screens.
+
+Actual sequential allocations and paired complete-transform/full-draft screens:
+
+| subset | additional FP16 decoded MiB | maximum process MiB | full-draft GPU saving B1/B2/B3/B4, ms | decision |
+|---|---:|---:|---|---|
+| wq_a+wkv, all stages | 52.5 | 8550 | -0.002 / +0.012 / +0.018 / +0.050 | reject: all confidence vectors differ |
+| above + shared w1/w3/w2 | 255 | 8768 | -0.166 / -0.148 / -0.198 / -0.013 | reject: all confidence vectors differ |
+| all stage dense | 735 | 9248 | -0.563 / -0.478 / -0.531 / -0.102 | reject: slower and confidence drift |
+| head alone | 1262.5 | 9730 | -0.920 / -0.931 / -0.937 / -0.961 | reject: much slower |
+
+These are medians of within-pair CUDA-event savings, at canonical n_out5/5/4/4,
+synthetic anchor0 and full128-row context. The four canonical head cases have
+identical drafts/confidences; this is not the full80-case parity gate. The other
+subsets fail exactness even where their draft IDs happen to agree.
+
+Storage is exact rotated-basis FP16, reconstructed by the verified installed
+kernel, preserving both Hadamards, each matrix's suh/svh, FP16 input conversion
+and FP32 output. main_proj and its prescale/FP32 accumulation are retained.
+cuBLAS accumulation changes the result relative to the current compressed GEMM;
+exact stored weights alone do not establish op identity. No decoded BF16 weights,
+second model, whole-expert expansion or unbudgeted FP32 weight copy was used.
+
+All measured peaks leave over10 GiB below the20-GiB ceiling. Retaining a512-MiB
+safety reservation,15-MiB device staging and64-MiB workspace remains within that
+ceiling. Graph pools and CUDA module/context overhead are included in the
+nvidia-smi process peaks; allocator peaks are also recorded separately. The
+full production Markov cache remains resident. The reply-packing screen separately
+measures85 graphs (45 original plus40 reply twins) at8286 MiB process use.
+Any deployment would need its own peak check, but no materialisation candidate
+is being proposed. Raw per-sample pairs and active telemetry are on x86host under
+`w1/results/screen-material-{small,shared,dense,head}*`.

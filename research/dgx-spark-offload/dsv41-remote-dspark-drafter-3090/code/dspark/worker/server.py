@@ -399,7 +399,7 @@ class DraftCore:
 class GpuBackend:
     """Rows -> window KV and drafts on the 3090 through model.DSparkDrafter."""
 
-    def __init__(self, model, max_rows: int, row_bytes: int, graphs: bool = True):
+    def __init__(self, model, max_rows: int, row_bytes: int, graphs: bool = True, graph_reply: bool = False):
         import torch
 
         self.torch = torch
@@ -412,6 +412,9 @@ class GpuBackend:
         self.copy_done = torch.cuda.Event()      # the last H2D out of stage_buf (it is reused by the next flush)
         self.copy_done.record()
         self.graphs = graphs
+        if graph_reply and not graphs:
+            raise ValueError("graph_reply requires CUDA graphs")
+        self.graph_reply = graph_reply
         self.n_flush_rows = 0
         self.max_model_len = model.max_model_len
 
@@ -478,16 +481,23 @@ class GpuBackend:
         t = torch.from_numpy(host).to(self.dev, non_blocking=True)
         slots, anchors, last, lo = t[:, 0], t[:, 1], t[:, 2], t[:, 3]
         mg = None
+        packed = None
         if self.graphs and self.m.has_graph(B, N, n, margin=want_margin):
-            out = self.m.draft_graphed(slots, anchors, last, N, ctx_lo=lo, n_out=n, margin=want_margin)
-            ids, conf = out[0][:B], out[1][:B]
-            mg = out[2][:B] if want_margin else None
+            out = self.m.draft_graphed(slots, anchors, last, N, ctx_lo=lo, n_out=n, margin=want_margin,
+                                      packed_reply=self.graph_reply)
+            if self.graph_reply:
+                packed = out[0]
+            else:
+                ids, conf = out[0][:B], out[1][:B]
+                mg = out[2][:B] if want_margin else None
         elif want_margin:
             ids, conf, mg = self.m.draft_with_margin(slots, anchors, last, N, ctx_lo=lo, n_out=n)
         else:
             ids, conf = self.m.draft(slots, anchors, last, N, ctx_lo=lo, n_out=n)
-        parts = [ids.to(torch.float64), conf.to(torch.float64)] + ([mg.to(torch.float64)] if want_margin else [])
-        packed = torch.cat(parts, 1).cpu().numpy()                                   # one D2H + sync
+        if packed is None:
+            parts = [ids.to(torch.float64), conf.to(torch.float64)] + ([mg.to(torch.float64)] if want_margin else [])
+            packed = torch.cat(parts, 1)
+        packed = packed.cpu().numpy()                                             # one D2H + sync
         margin = packed[:, 2 * N:].astype(np.float32) if want_margin else None
         return packed[:, :N].astype(np.int32), packed[:, N:2 * N].astype(np.float32), margin
 
@@ -686,7 +696,11 @@ class TcpStubServer:
 # ------------------------------------------------------------------------------------------------ main
 
 
-def build_core(root: str, graphs: bool = True, max_model_len: int = 327680) -> tuple[DraftCore, object]:
+def build_core(root: str, graphs: bool = True, tp: int = 1, max_model_len: int = 327680) -> tuple[DraftCore, object]:
+    if tp == 2:
+        return build_core_tp2(root, graphs, max_model_len=max_model_len)
+    if tp != 1:
+        raise SystemExit(f"--tp {tp}: 1 (one 3090) or 2 (the NVLink pair)")
     import torch
 
     from .checkpoint import Checkpoint
@@ -705,13 +719,46 @@ def build_core(root: str, graphs: bool = True, max_model_len: int = 327680) -> t
     model = DSparkDrafter(ck, dev, slots=8, max_model_len=max_model_len)
     exp = expected_hello(bytes.fromhex(ident["drafter_identity"]), bytes.fromhex(ident["markov_identity"]),
                          max_model_len=max_model_len)
+    graph_reply = os.environ.get("DSPARK_GRAPH_REPLY", "0") == "1"
     if graphs:
         model.capture(batch_sizes=tuple(range(1, exp.max_slots + 1)), ks=(exp.num_spec,),
-                      insert_rows=(8, 16, 32, 64, 128), n_outs=tuple(range(1, exp.num_spec + 1)))
-    backend = GpuBackend(model, exp.max_rows_per_step, exp.row_bytes, graphs=graphs)
+                      insert_rows=(8, 16, 32, 64, 128), n_outs=tuple(range(1, exp.num_spec + 1)),
+                      pack_reply=graph_reply)
+    backend = GpuBackend(model, exp.max_rows_per_step, exp.row_bytes, graphs=graphs, graph_reply=graph_reply)
     core = DraftCore(exp, backend)
     log.info("worker ready in %.1f s: drafter_identity %s, markov_identity %s, %.2f GiB reserved", time.time() - t0,
              ident["drafter_identity"], ident["markov_identity"], torch.cuda.memory_reserved(dev) / 2**30)
+    return core, model
+
+
+def build_core_tp2(root: str, graphs: bool = True, max_model_len: int = 327680) -> tuple[DraftCore, object]:
+    """The TP = 2 worker (tp2.py, lane E) on the NVLink pair: CUDA_VISIBLE_DEVICES = DRAFTER0,DRAFTER1 (in that order;
+    rank 0 = DRAFTER0, PHB to the ConnectX-5). DSPARK_WORKER_TP_EMULATE=1 runs both ranks on GPU-DRAFTER1 alone
+    (tests only: one card's speed, the same contract and drafts). max_model_len as in build_core (each rank holds the
+    replicated RoPE table: (max_model_len + 2048) x 64 fp32, 269 MB at 1,048,576)."""
+    import torch
+
+    from .checkpoint import Checkpoint
+    from .identity import compute as compute_identity
+    from .tp2 import TP2Backend, TPDrafter, check_visible
+
+    emulate = os.environ.get("DSPARK_WORKER_TP_EMULATE") == "1"
+    check_visible(pair=not emulate)
+    t0 = time.time()
+    ck = Checkpoint(root)
+    ident = compute_identity(root, ck.manifest)
+    devs = [torch.device("cuda", 0), torch.device("cuda", 0 if emulate else 1)]
+    model = TPDrafter(ck, devs, slots=8, max_model_len=max_model_len)
+    exp = expected_hello(bytes.fromhex(ident["drafter_identity"]), bytes.fromhex(ident["markov_identity"]),
+                         max_model_len=max_model_len)
+    if graphs:
+        model.capture(batch_sizes=tuple(range(1, exp.max_slots + 1)), ks=(exp.num_spec,),
+                      insert_rows=(8, 16, 32, 64, 128), n_outs=tuple(range(1, exp.num_spec + 1)))
+    backend = TP2Backend(model, exp.max_rows_per_step, exp.row_bytes, graphs=graphs, max_slots=exp.max_slots)
+    core = DraftCore(exp, backend, worker_name="e-dspark-3090x2" + ("-emulated" if emulate else ""))
+    log.info("TP=2 worker ready in %.1f s: drafter_identity %s, markov_identity %s, %s GiB reserved per device",
+             time.time() - t0, ident["drafter_identity"], ident["markov_identity"],
+             [round(torch.cuda.memory_reserved(d) / 2**30, 2) for d in dict.fromkeys(devs)])
     return core, model
 
 
@@ -722,6 +769,8 @@ def main() -> None:
     ap.add_argument("--tcp-stub", action="append", default=[], help="ip:port for the contract's TCP stub")
     ap.add_argument("--no-rdma", action="store_true")
     ap.add_argument("--no-graphs", action="store_true")
+    ap.add_argument("--tp", type=int, default=int(os.environ.get("DSPARK_WORKER_TP", "1")),
+                    help="1: one 3090 (default); 2: the NVLink pair (tp2.py; or DSPARK_WORKER_TP=2)")
     ap.add_argument("--max-model-len", type=int, default=327680,
                     help="largest max_model_len a session may announce (engine MAX_LEN); sizes the RoPE table")
     ap.add_argument("--status-file", default=os.path.expanduser("~/dsv41-offload/o2/run/worker.status.json"))
@@ -731,7 +780,7 @@ def main() -> None:
         raise SystemExit("no listener: give --ofl and/or --tcp-stub")
     if not 1 <= args.max_model_len <= 1048576:
         raise SystemExit(f"--max-model-len {args.max_model_len} outside 1..1048576 (the model's max_position_embeddings)")
-    core, model = build_core(args.root, graphs=not args.no_graphs, max_model_len=args.max_model_len)
+    core, model = build_core(args.root, graphs=not args.no_graphs, tp=args.tp, max_model_len=args.max_model_len)
     servers = []
     for spec in args.ofl:
         ip, port = spec.rsplit(":", 1)

@@ -24,7 +24,7 @@ def model():
     for b, lp in enumerate((300, 500, 700, 900)):
         rows = torch.arange(lp - 127, lp + 1, device=dev)
         m.insert(torch.full_like(rows, b), rows, m.main_x(taps[rows]))
-    m.capture(batch_sizes=(1, 2, 3, 4), ks=(5,), insert_rows=(8,), n_outs=(1, 2, 3, 4))
+    m.capture(batch_sizes=(1, 2, 3, 4), ks=(5,), insert_rows=(8,), n_outs=(1, 2, 3, 4), pack_reply=True)
     return m, toks
 
 
@@ -61,6 +61,51 @@ def test_n_out_bit_identical(model, B):
 def test_main_proj_fp32_accumulation(model):
     m, _ = model
     assert m.main_proj_fp32acc and m.main_proj.ext.__name__ == "exllamav3_ext_facc"
+
+
+@pytest.mark.parametrize("B", [1, 2, 3, 4])
+def test_captured_reply_exact_for_all_depths_and_margins(model, B):
+    m, toks = model
+    slots = torch.arange(B, device=m.dev)
+    last = torch.tensor((300, 500, 700, 900)[:B], device=m.dev)
+    # Consecutive calls must not expose a prior graph's stale outputs.
+    for anchor in (toks[last + 1], toks[last + 2]):
+        for n in (1, 2, 3, 4, 5):
+            for margin in (False, True):
+                values = m.draft_graphed(slots, anchor, last, 5, n_out=n, margin=margin)
+                expected = torch.cat([v.to(torch.float64) for v in values], 1)
+                (packed,) = m.draft_graphed(slots, anchor, last, 5, n_out=n, margin=margin, packed_reply=True)
+                assert torch.equal(packed.view(torch.int64), expected.view(torch.int64)), (B, n, margin)
+
+
+def test_missing_packed_graph_refuses_instead_of_falling_back(model):
+    m, _ = model
+    key = (1, 5, 5, False)
+    saved = m.reply_graphs.pop(key)
+    try:
+        v = torch.zeros(1, device=m.dev, dtype=torch.int64)
+        with pytest.raises(KeyError, match="packed True"):
+            m.draft_graphed(v, v, v, 5, packed_reply=True)
+    finally:
+        m.reply_graphs[key] = saved
+
+
+def test_backend_packed_reply_same_for_mixed_request_depths(model):
+    import numpy as np
+    from worker.server import GpuBackend
+    from worker.window import WindowRange
+    m, toks = model
+    plain = GpuBackend(m, 1, 30720)
+    packed = GpuBackend(m, 1, 30720, graph_reply=True)
+    reqs = [(i, int(toks[lp + 1]), lp + 1, WindowRange(128, lp - 127, lp), i + 1)
+            for i, lp in enumerate((300, 500, 700, 900))]
+    for margin in (False, True):
+        expected = plain.draft(reqs, 5, margin)
+        actual = packed.draft(reqs, 5, margin)
+        for a, b in zip(actual, expected):
+            assert (a is None and b is None) or (
+                a is not None and b is not None and a.dtype == b.dtype and a.shape == b.shape
+                and np.array_equal(a.view(np.uint8), b.view(np.uint8)))
 
 
 @pytest.mark.parametrize("B,n", [(1, 5), (2, 5), (4, 4), (3, 2)])

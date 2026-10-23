@@ -24,6 +24,10 @@ from .transport import RpcClient, TransportError, TransportTimeout, make_client
 
 log = logging.getLogger("vllm.remote_dspark")
 
+# While the worker stays unreachable the background thread retries every backoff interval (5 s in production), so only the
+# first failure of a run and then one line per CONNECT_FAIL_LOG_S are logged; the counter connect_failures counts them all.
+CONNECT_FAIL_LOG_S = 60.0
+
 
 def check_reply_values(reply: wire.StepReply, entries: list[wire.ReqEntry], *,
                        vocab_size: int, window: int) -> None:
@@ -125,12 +129,17 @@ class RemoteDraftClient:
         stats: Stats | None = None,
         transport_factory: Callable[..., RpcClient] | None = None,
         background: bool = True,
+        session: int | None = None,
     ):
+        """session: the session id of every HELLO and STEP (default: random). A respawned process proxy gets one its
+        predecessor never used, so its first HELLO makes the worker drop every window (CONTRACT 6.2)."""
         self.cfg = cfg
         self.hello = hello
         self.stats = stats or Stats()
         self._factory = transport_factory or make_client
-        self.session = secrets.randbits(32) or 1
+        if session is not None and not 0 < session <= 0xFFFFFFFF:
+            raise ValueError(f"session {session} outside 1..2**32-1")
+        self.session = session or secrets.randbits(32) or 1
         self._lock = threading.Lock()
         self._seq = 0
         self._client: RpcClient | None = None
@@ -141,6 +150,8 @@ class RemoteDraftClient:
         self.last_error: str | None = None
         self._backoff_ms = cfg.backoff_ms
         self._next_attempt = 0.0
+        self._fail_run = 0                   # connect/HELLO failures since the last successful HELLO
+        self._fail_logged = 0.0              # monotonic time of the last connect-failure log line
         self._wake = threading.Event()
         self._stop = False
         self._resp = bytearray(1 << 16)
@@ -292,7 +303,16 @@ class RemoteDraftClient:
                 cli.close()
             self.last_error = f"connect: {e}"
             self.stats.inc("connect_failures")
-            log.warning("remote DSpark connect/HELLO to %s failed: %s", self.cfg.endpoint, e)
+            self._fail_run += 1
+            now = time.monotonic()
+            if self._fail_run == 1:
+                self._fail_logged = now
+                log.warning("remote DSpark connect/HELLO to %s failed: %s (target-only rounds; retrying, "
+                            "further failures logged once per %.0f s)", self.cfg.endpoint, e, CONNECT_FAIL_LOG_S)
+            elif now - self._fail_logged >= CONNECT_FAIL_LOG_S:
+                self._fail_logged = now
+                log.warning("remote DSpark connect/HELLO to %s still failing after %d attempts: %s",
+                            self.cfg.endpoint, self._fail_run, e)
             return False
         with self._lock:
             stale = session != self.session     # new_session() ran meanwhile
@@ -312,8 +332,10 @@ class RemoteDraftClient:
         self.stats.set("worker", {"name": rep.worker_name, "max_slots": rep.max_slots,
                                   "max_rows_per_step": rep.max_rows_per_step,
                                   "capabilities": rep.capabilities})
-        log.info("remote DSpark worker %r ready at %s (session %#010x, epoch %d)",
-                 rep.worker_name, self.cfg.endpoint, session, self.epoch)
+        failed, self._fail_run = self._fail_run, 0
+        log.info("remote DSpark worker %r ready at %s (session %#010x, epoch %d)%s",
+                 rep.worker_name, self.cfg.endpoint, session, self.epoch,
+                 f" after {failed} failed connect attempts" if failed else "")
         return True
 
     def _run(self) -> None:
@@ -344,12 +366,18 @@ class RemoteDraftClient:
         step_id: int,
         step_flags: int = 0,
         epoch: int | None = None,
+        rows=None,
     ) -> StepOutcome:
-        """Send one STEP. ``buf`` is a writable buffer whose rows already sit at
-        ``wire.APP_HEADER_SIZE + wire.rows_offset_for(len(entries))``; the headers are
-        written in front of them here, so the message goes out without a copy. ``epoch``:
-        the connection epoch the entries were built for; a newer connection is refused
-        (reason "reconnected", nothing sent), since its slots were never resynced."""
+        """Send one STEP. Without ``rows``: ``buf`` is a writable buffer whose rows already
+        sit at ``wire.APP_HEADER_SIZE + wire.rows_offset_for(len(entries))``; the headers are
+        written in front of them here, so the message goes out without a copy. With ``rows``
+        (n_rows x row_bytes, contiguous; RoundCore always): ``buf`` is the caller's private
+        buffer and takes only the headers and entries, and the message goes out as
+        [headers, rows] (RpcClient.request_parts), so nothing is written into the memory that
+        holds the rows: the gather staging the engine stream may already be refilling for a
+        later round (S11 P-1). ``epoch``: the connection epoch the entries were built for; a
+        newer connection is refused (reason "reconnected", nothing sent), since its slots
+        were never resynced."""
         if self.disabled:
             return StepOutcome(False, reason="disabled")
         with self._lock:
@@ -367,10 +395,18 @@ class RemoteDraftClient:
         body_len = ro + n_rows * row_bytes
         wire.AppHeader(op=wire.OP_STEP, seq=seq, session=session,
                        body_len=body_len).pack_into(buf, 0)
-        msg = memoryview(buf).cast("B")[:wire.APP_HEADER_SIZE + body_len]
+        if rows is None:
+            parts = (memoryview(buf).cast("B")[:wire.APP_HEADER_SIZE + body_len],)
+        else:
+            if rows.nbytes != n_rows * row_bytes:
+                raise ValueError(f"rows hold {rows.nbytes} bytes, {n_rows} rows need {n_rows * row_bytes}")
+            parts = (memoryview(buf).cast("B")[:wire.APP_HEADER_SIZE + ro], rows)
         t0 = time.perf_counter()
         try:
-            n = cli.request(msg, self._resp, self.cfg.timeout_ms / 1000.0)
+            if len(parts) == 1:
+                n = cli.request(parts[0], self._resp, self.cfg.timeout_ms / 1000.0)
+            else:
+                n = cli.request_parts(parts, self._resp, self.cfg.timeout_ms / 1000.0)
         except TransportTimeout:
             self.mark_failed("timeout")
             return StepOutcome(False, reason="timeout", unknown_apply=True)
@@ -378,7 +414,7 @@ class RemoteDraftClient:
             self.mark_failed(f"transport: {e}")
             return StepOutcome(False, reason="transport_error", unknown_apply=True)
         rtt_us = (time.perf_counter() - t0) * 1e6
-        self.stats.inc("bytes_sent", len(msg))
+        self.stats.inc("bytes_sent", wire.APP_HEADER_SIZE + body_len)
         self.stats.inc("bytes_received", n)
         try:
             h, body = wire.split_frame(memoryview(self._resp)[:n])

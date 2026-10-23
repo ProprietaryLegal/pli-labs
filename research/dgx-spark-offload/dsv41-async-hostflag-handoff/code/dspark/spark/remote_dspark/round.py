@@ -9,8 +9,11 @@ decision is identical across TP ranks (CONTRACT 4.1).
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -22,30 +25,76 @@ import torch
 
 from . import wire
 from .breaker import CircuitBreaker
-from .client import RemoteDraftClient, StepOutcome
+from .client import RemoteDraftClient
 from .config import RemoteConfig
 from .gather import BatchView, RowGatherer, batch_view_from_input_batch
+from .hostflag import _V, set_timer_slack
+from .roundcore import (  # noqa: F401 -- STATUS_* are re-exported (speculator.py, tests)
+    META_SLOTS, STATUS_NAMES, STATUS_OK, STATUS_ROUND_FAILED, STATUS_SOME_FAILED, ReplyLayout, RoundCore)
+from .proxy_proc import (START_TIMEOUT_S, ProxyProcess, ProxyStartError, encode_init, merge_snapshots,
+                         monotonic_ms, unmerge_snapshot, write_json_atomic)
+from .shmregion import (C_DESC_HEAD, C_DESC_TAIL, C_DONE, C_ENGINE_SEQ, C_FLUSH_ACK, C_FLUSH_REQ, C_HEARTBEAT, C_PID,
+                        C_START, C_STATE, C_STOP, C_WD, F_ENQUEUE_FAILED, R_PENDING, S_STARTING, RegionLayout)
 from .state import SlotTable
 from .stats import Stats
+from .streamsync import FAR_AHEAD, release_hand_off
 
 log = logging.getLogger("vllm.remote_dspark")
 
-STATUS_OK = 0            # every request that needed drafts got usable remote drafts
-STATUS_SOME_FAILED = 1   # some requests did not (see ok_mask)
-STATUS_ROUND_FAILED = 2  # no remote drafts this round
-STATUS_NAMES = {STATUS_OK: "ok", STATUS_SOME_FAILED: "some_failed",
-                STATUS_ROUND_FAILED: "round_failed"}
+# process proxy stall detection (S11 P-3): the proxy is declared lost after this many watchdog fires in a row during
+# which it finished no round (C_DONE did not move), or when its heartbeat is older than heartbeat_limit_ms()
+STALL_FIRES = 3
+_M32 = 0xFFFFFFFF
+# process proxy respawn (S11 P-4): no new proxy sooner than this after a loss or a failed start
+RESPAWN_DELAY_S = 1.0
+LOSSES_KEPT = 16
 
 
-class BroadcastLayout:
+def stall_fires(cfg: RemoteConfig) -> int:
+    """Watchdog fires in a row, with no round finished, that mean a stalled proxy: STALL_FIRES, and more when an explicit
+    deadline is shorter than the network timeout (one slow but live round may then span several deadlines; the auto
+    deadline is >= 4 x the timeout)."""
+    return max(STALL_FIRES, -(-cfg.timeout_ms // cfg.watchdog_ms) + 2)
+
+
+def heartbeat_limit_ms(cfg: RemoteConfig) -> int:
+    """Age at which the process proxy's heartbeat means it is stalled: 2 x the watchdog deadline, and never less than
+    one network round plus two housekeeping polls (the proxy's main thread beats between rounds and every 100 ms while
+    it waits; inside a round it is blocked for at most the client timeout)."""
+    return max(2 * cfg.watchdog_ms, cfg.timeout_ms + 250)
+
+
+def _new_session(old: int | None) -> int:
+    """A worker session id (u32, not 0) other than old."""
+    while True:
+        s = secrets.randbits(32)
+        if s and s != old:
+            return s
+
+
+@dataclass
+class _Respawn:
+    """A lost process proxy being replaced (S11 P-4). Engine thread only."""
+    old: ProxyProcess             # the lost (or failed) process, SIGKILLed; the words are reset only once it is reaped
+    drain: object                 # sync.drain_marker() at the loss: every stream operation of the lost proxy's rounds
+    lost_at: float
+    due: float                    # no new start before this
+    new: ProxyProcess | None = None
+    started_at: float = 0.0
+    warned: bool = False
+
+
+def _region_tensor(region, offset: int, dtype: torch.dtype, shape: tuple[int, ...]) -> torch.Tensor:
+    """A torch view of the process proxy's shared region (shares its memory; the region's
+    owner keeps it mapped and registered)."""
+    n = 1
+    for d in shape:
+        n *= d
+    return torch.frombuffer(region.mm, dtype=dtype, count=n, offset=offset).view(shape)
+
+
+class BroadcastLayout(ReplyLayout):
     """int32 tensor: [status, n, ok_mask[M], drafts[M*N], conf_bits[M*N]]."""
-
-    def __init__(self, max_reqs: int, num_spec: int):
-        self.M, self.N = max_reqs, num_spec
-        self.o_ok = 2
-        self.o_ids = 2 + max_reqs
-        self.o_conf = self.o_ids + max_reqs * num_spec
-        self.size = self.o_conf + max_reqs * num_spec
 
     def drafts(self, t: torch.Tensor, n: int) -> torch.Tensor:
         return t[self.o_ids:self.o_ids + n * self.N].view(n, self.N)
@@ -55,6 +104,30 @@ class BroadcastLayout:
 
     def ok_mask(self, t: torch.Tensor, n: int) -> torch.Tensor:
         return t[self.o_ok:self.o_ok + n]
+
+
+def make_remote_round(cfg: RemoteConfig, hello: wire.Hello, *, device: torch.device, tp_rank: int,
+                      broadcast_fn: Callable[[torch.Tensor], None] | None, stats: Stats, background: bool,
+                      stream_sync=None, n_out_by_reqs: list[int] | None = None) -> "RemoteRound":
+    """The engine's RemoteRound (speculator._make_round). With the process proxy, a proxy that does not start falls
+    back to synchronous rounds, as a refused hand-off self-test does (S11 P-2): the watchdog stops, the shared region is
+    unregistered and unmapped (release_hand_off), stats async_fallback_reason says why. A strict start (background
+    False: VLLM_DSPARK_REMOTE_STRICT_START) raises ProxyStartError instead, after the same release."""
+    kw = dict(device=device, tp_rank=tp_rank, broadcast_fn=broadcast_fn, stats=stats, background=background,
+              n_out_by_reqs=n_out_by_reqs)
+    try:
+        return RemoteRound(cfg, hello, stream_sync=stream_sync, **kw)
+    except ProxyStartError as e:
+        why = str(e)
+    # the exception and the failed constructor's frames (and their views of the region) are gone here
+    leak = release_hand_off(stream_sync)
+    if leak:
+        log.error("remote DSpark: after the failed proxy start the %s", leak)
+    if not background:
+        raise ProxyStartError(why)
+    log.warning("remote DSpark async proxy process did not start (%s); synchronous rounds", why)
+    stats.set("async_fallback_reason", f"proxy process: {why}")
+    return RemoteRound(cfg, hello, stream_sync=None, **kw)
 
 
 @dataclass
@@ -85,7 +158,7 @@ class RoundResult:
         return self.status_host
 
 
-class RemoteRound:
+class RemoteRound(RoundCore):
     def __init__(
         self,
         cfg: RemoteConfig,
@@ -120,33 +193,57 @@ class RemoteRound:
         self._last_log = time.monotonic()
         self._err_logged = 0.0
         self.client: RemoteDraftClient | None = None
+        self._meta_slots = 1
         self._bcast_ev = None
         self.gatherer: RowGatherer | None = None
         self.slots: SlotTable | None = None
         self.breaker: CircuitBreaker | None = None
+        # process proxy: the hand-off lives in a shared region (shmregion.py) the round's proxy
+        # process maps too; that process owns the client, slots and breaker (proxy_proc.py)
+        self.region = getattr(stream_sync, "shared", None) if self.is_sender else None
+        self.proxy: ProxyProcess | None = None
         if self.is_sender:
             pin = self.device.type == "cuda"
-            self.bcast_host = torch.zeros(self.layout.size, dtype=torch.int32, pin_memory=pin)
-            self.bcast_np = self.bcast_host.numpy()
-            # recorded after every copy out of bcast_host; waited on before the host rewrites
-            # it (normally already complete: each round synchronizes on its gather first).
-            # Async mode has none: the proxy thread makes no CUDA call, and stream order already
-            # guarantees the previous reply copy ran before the next round is gathered (streamsync.py)
-            self._bcast_ev = torch.cuda.Event() if pin and stream_sync is None else None
+            if stream_sync is None:
+                self.bcast_host = torch.zeros(self.layout.size, dtype=torch.int32, pin_memory=pin)
+                self.bcast_np = self.bcast_host.numpy()
+                # recorded after every copy out of bcast_host; waited on before the host rewrites
+                # it (normally already complete: each round synchronizes on its gather first)
+                self._bcast_ev = torch.cuda.Event() if pin else None
+            else:
+                # async: the proxy builds the reply in this private buffer and publishes it into
+                # the hand-off's registered page in one GIL-free call (streamsync.HostFlagCore);
+                # the engine stream copies it from there after the wait. No event, no CUDA here
+                self.bcast_host = None
+                self.bcast_np = np.zeros(self.layout.size, dtype=np.int32)
+            # async: round t's gather metadata goes to slot t % _meta_slots (roundcore.META_SLOTS)
+            self._meta_slots = META_SLOTS if stream_sync is not None else 1
+            host = {}
+            if self.region is not None:
+                L = self.region.layout
+                if L != RegionLayout.for_hello(hello, L.ring):
+                    raise ValueError(f"shared region layout {L} does not match the HELLO")
+                self._meta_slots = L.ring
+                host = dict(host_msg=_region_tensor(self.region, L.off_msg, torch.uint8, (L.msg_capacity,)),
+                            host_meta=_region_tensor(self.region, L.off_meta, torch.int64,
+                                                     (L.ring, 4, self.M)),
+                            d2h=stream_sync.d2h)
             self.gatherer = RowGatherer(max_slots=self.M, window=self.W, hidden=hello.hidden,
                                         n_taps=hello.n_taps, max_rows=hello.max_rows_per_step,
-                                        device=self.device, fused=cfg.fused_gather)
+                                        device=self.device, fused=cfg.fused_gather,
+                                        meta_slots=self._meta_slots, **host)
             if self.gatherer.row_bytes != hello.row_bytes:
                 raise ValueError(f"row bytes {self.gatherer.row_bytes} != {hello.row_bytes}")
-            self.slots = SlotTable(self.M, self.W)
-            self.breaker = CircuitBreaker(cfg.trip, cfg.cooldown)
-            self.stats.set("breaker", self.breaker.snapshot())
-            self.client = client or RemoteDraftClient(
-                cfg, hello, stats=self.stats, transport_factory=transport_factory,
-                background=background)
-            self.stats.set("contract_version", wire.CONTRACT_VERSION)
-            self.stats.set("policy", cfg.policy)
-            self.stats.set("endpoint", str(cfg.endpoint))
+            if self.region is None:
+                self.slots = SlotTable(self.M, self.W)
+                self.breaker = CircuitBreaker(cfg.trip, cfg.cooldown)
+                self.stats.set("breaker", self.breaker.snapshot())
+                self.client = client or RemoteDraftClient(
+                    cfg, hello, stats=self.stats, transport_factory=transport_factory,
+                    background=background)
+                self.stats.set("contract_version", wire.CONTRACT_VERSION)
+                self.stats.set("policy", cfg.policy)
+                self.stats.set("endpoint", str(cfg.endpoint))
             self.stats.set("rank0_buffers", {"device_bytes": self.gatherer.device_bytes,
                                              "pinned_host_bytes": self.gatherer.host_bytes})
             self.stats.set("fused_gather", {"on": self.gatherer.fused,
@@ -163,6 +260,12 @@ class RemoteRound:
             if not getattr(self.sync, "cuda_free_proxy", False):
                 raise ValueError("async rounds need a CUDA-free hand-off (streamsync.HostFlagSync)")
             assert self.gatherer is not None
+            self._stop = threading.Event()
+            self._dead: str | None = None
+            self._reply_bytes = self.layout.size * 4
+            if self.region is not None:
+                self._start_process_proxy(background)
+                return
             # resync windows: the engine stream copies a requested slot's whole ring window here
             # after the round's gather; the proxy builds resync rows from it on the CPU
             self.resync_host = torch.zeros(self.M, self.W, self.gatherer.row_elems,
@@ -171,13 +274,113 @@ class RemoteRound:
             self.resync_np = self.resync_host.view(torch.uint8).numpy()
             self._resync_lock = threading.Lock()
             self._resync_req: set[int] = set()
-            self._stop = threading.Event()
+            # the native watchdog fails and releases a round nobody released within the deadline:
+            # a proxy that cannot run (GIL held by a waiting extension, a blocked GC finalizer,
+            # death, interpreter exit) costs one fail-closed round, never a parked GPU (S9 F2/F5)
+            self.sync.attach(self._reply_bytes, STATUS_ROUND_FAILED, cfg.watchdog_ms)
             self._q = queue.Queue()
             self._thread = threading.Thread(target=self._async_main, daemon=True,
                                             name="dsv41-remote-dspark-round")
             self._thread.start()
             self.stats.set("async", True)
             self.stats.set("async_handoff", self.sync.describe())
+
+    def _start_process_proxy(self, background: bool) -> None:
+        """Async, process proxy: region-backed resync windows, the watchdog (this process), then
+        the proxy process; returns once it reports its start (strict: connected + HELLO)."""
+        assert self.region is not None and self.sync is not None and self.gatherer is not None
+        L = self.region.layout
+        g = self.gatherer
+        self.resync_host = _region_tensor(self.region, L.off_resync, g.dtype,
+                                          (self.M, self.W, g.row_elems))
+        self._session = _new_session(None)
+        self._generation = 0
+        self._respawn: _Respawn | None = None
+        self._respawns_left = self.cfg.async_respawns
+        self._respawn_count = self._respawn_failures = 0
+        self._losses: list[dict] = []
+        try:
+            # every failure from here on is a failed start of the async path (make_remote_round falls back)
+            self.sync.attach(self._reply_bytes, STATUS_ROUND_FAILED, self.cfg.watchdog_ms)
+            init = self._proxy_init(start_round=1, strict=not background)
+            self.proxy = ProxyProcess(self.region, self.sync.lib, init)
+            self.proxy.wait_started(START_TIMEOUT_S + self.cfg.connect_timeout_ms / 1000)
+        except BaseException as e:
+            self.sync.stop_watchdog()
+            if self.proxy is not None:
+                self.proxy.kill()
+            # nothing of this half-built round may keep a view of the region (make_remote_round unmaps it)
+            self.gatherer = self.resync_host = None
+            if isinstance(e, Exception) and not isinstance(e, ProxyStartError):
+                raise ProxyStartError(f"remote DSpark proxy process could not be started: "
+                                      f"{type(e).__name__}: {e}") from e
+            raise
+        self._live_since = time.monotonic()
+        self.stats.set("async", True)
+        self._proxy_info = {"mode": "process", "pid": self.proxy.pid, "generation": 0,
+                            "descriptor_ring": L.ring, "region_bytes": L.size,
+                            "region_mlock": "ok" if not self.region.mlock_errno else f"errno {self.region.mlock_errno}"}
+        self.stats.set("async_proxy", dict(self._proxy_info))
+        self.stats.set("async_dead", None)
+        self._respawn_stats("live")
+        self.stats.set("async_handoff", self.sync.describe())
+        self._wd_fires = self.region.u64(C_WD, 1)          # watchdog mirror: fires (stall detection)
+        self._hb_limit_ms = heartbeat_limit_ms(self.cfg)
+        self._stall_limit = stall_fires(self.cfg)
+        self.stats.set("async_stall_detection", {"heartbeat_limit_ms": self._hb_limit_ms,
+                                                 "stall_fires": self._stall_limit})
+        self._health_reset()
+        self.proxy.publish_engine_stats(self.stats.snapshot())
+
+    def _proxy_init(self, *, start_round: int, strict: bool, base_counters: dict | None = None) -> bytes:
+        return encode_init(self.cfg, self.hello, self.region.layout, n_out_by_reqs=self.n_out_by_reqs,
+                           lib_path=self.sync.lib._name, spin_us=self.sync.spin_ns // 1000,
+                           nap_us=self.sync.nap_ns // 1000, watchdog_ms=self.cfg.watchdog_ms,
+                           strict=strict, parent_pid=os.getpid(),
+                           pdeathsig=threading.current_thread() is threading.main_thread(),
+                           start_round=start_round, session=self._session, base_counters=base_counters,
+                           generation=self._generation)
+
+    def _health_reset(self) -> None:
+        """Stall detection baselines for the current proxy (start, respawn)."""
+        self.sync.watchdog_mirror(self.region.word(C_WD))
+        self._hc_fires = int(self._wd_fires[0])
+        self._hc_done = self.proxy.word(C_DONE)
+        self._stall_fires = 0
+        self._last_submit = time.monotonic()
+
+    def _proxy_health(self, t: int) -> tuple[str, str] | None:
+        """Process proxy, live: (kind, reason) when it must be declared lost, else None. Called once per submit.
+        exit: the process is gone. ring: descriptor t would overwrite one the proxy never took. fires: stall_fires()
+        watchdog fires with no round finished in between (a proxy that is alive but stuck, or one that runs but has
+        lost track of the rounds). heartbeat: its housekeeping has not run for heartbeat_limit_ms (a stopped or
+        descheduled process; judged only when this engine thread itself ran in that time, so a pause of the whole
+        container is not taken for a proxy stall). Each stall costs at most a few watchdog deadlines, not a whole
+        descriptor ring of them (S11 P-3: 64 x 200 ms before)."""
+        p = self.proxy
+        rc = p.exit_code()
+        if rc is not None:
+            return "exit", f"proxy process exited with {rc}"
+        ring = self.region.layout.ring
+        if ((t - p.tail()) & _M32) > ring:
+            return "ring", f"proxy process stalled ({ring} rounds not taken at round {t})"
+        now = time.monotonic()
+        ran = now - self._last_submit < self._hb_limit_ms / 1000
+        self._last_submit = now
+        fires, done = int(self._wd_fires[0]), p.word(C_DONE)
+        if done != self._hc_done:
+            self._hc_done, self._stall_fires = done, 0
+        else:
+            self._stall_fires += fires - self._hc_fires
+        self._hc_fires = fires
+        if self._stall_fires >= self._stall_limit:
+            return "fires", (f"proxy process stalled: {self._stall_fires} watchdog fires with no round finished "
+                             f"(last finished round {done}, at round {t})")
+        if ran:
+            age = p.heartbeat_age_ms()
+            if age > self._hb_limit_ms:
+                return "heartbeat", f"proxy process heartbeat {age} ms old (limit {self._hb_limit_ms} ms, round {t})"
+        return None
 
     # ------------------------------------------------------------------ run
 
@@ -186,11 +389,15 @@ class RemoteRound:
             next_prefill_tokens: torch.Tensor) -> RoundResult:
         n = input_batch.num_reqs
         res = RoundResult(n=n, bcast=self.bcast, layout=self.layout)
-        if self.async_mode:
+        if self.proxy is not None:
+            self._submit_process(input_batch, aux_hidden_states, num_sampled, num_rejected,
+                                 last_sampled, next_prefill_tokens)
+        elif self.async_mode:
             self._submit_async(input_batch, aux_hidden_states, num_sampled, num_rejected,
                                last_sampled, next_prefill_tokens)
         elif self.is_sender:
             t0 = time.perf_counter()
+            bv = None
             try:
                 bv = batch_view_from_input_batch(input_batch)
                 status = self._sender_round(bv, input_batch, aux_hidden_states, num_sampled,
@@ -210,6 +417,9 @@ class RemoteRound:
             self.bcast.copy_(self.bcast_host, non_blocking=True)
             self._bcast_copied()
             self.stats.observe("rank0_round_us", (time.perf_counter() - t0) * 1e6)
+            if bv is not None:
+                self.stats.observe(f"rank0_round_us_{self._phase(bv)}",
+                                   (time.perf_counter() - t0) * 1e6)
             self.rounds += 1
             self._maybe_log()
         if self.broadcast_fn is not None:
@@ -226,21 +436,6 @@ class RemoteRound:
         if self._bcast_ev is not None:
             self._bcast_ev.synchronize()
 
-    def n_out_for(self, n: int) -> int:
-        """ReqEntry.n_out for a round of n requests (0 = all N positions)."""
-        t = self.n_out_by_reqs
-        if not t:
-            return 0
-        c = int(t[min(n, len(t) - 1)])
-        return 0 if c >= self.N else max(1, c)
-
-    def _pack_failed(self, n: int) -> None:
-        self._bcast_writable()
-        b = self.bcast_np
-        b[:] = 0
-        b[0] = STATUS_ROUND_FAILED
-        b[1] = n
-
     def _sender_round(self, bv: BatchView, input_batch, aux, num_sampled, num_rejected,
                       last_sampled, next_prefill_tokens, res: RoundResult) -> int:
         assert self.gatherer is not None
@@ -252,128 +447,6 @@ class RemoteRound:
         self.stats.observe("gather_us", (time.perf_counter() - tg) * 1e6)
         return self._after_gather(bv, g, res, step_id=self.rounds + 1)
 
-    def _after_gather(self, bv: BatchView, g, res: RoundResult, step_id: int) -> int:
-        assert self.gatherer is not None and self.slots is not None and self.client is not None
-        n = bv.n
-        # rank-0 bookkeeping of the ring (CONTRACT 7.1, 7.3). ready + epoch are read once, together:
-        # every entry below is built for this connection, and step() refuses any newer one
-        epoch = self.client.connection_epoch()
-        if epoch is not None and epoch != self._last_epoch:
-            self._last_epoch = epoch
-            self.slots.mark_all_dirty()
-        slots = self.slots
-        anchors_pos = g.first_pos + g.valid
-        for i in range(n):
-            s = int(bv.slots[i])
-            st = slots[s]
-            slots.begin_request(s, bv.req_ids[i])
-            v = int(g.valid[i])
-            if v <= 0:
-                st.rng.clear()
-                st.dirty = True
-                continue
-            try:
-                st.rng.apply(int(g.first_pos[i]), v, int(anchors_pos[i]))
-            except ValueError as e:
-                log.warning("slot %d ring bookkeeping: %s", s, e)
-                st.rng.clear()
-                st.dirty = True
-        assert self.breaker is not None
-        if not self.breaker.allow():
-            # open breaker: no network this round (CONTRACT 10); the ring above stays exact
-            if self.breaker.state == "half_open":
-                self.stats.set("breaker", self.breaker.snapshot())
-            return self._fail_round(bv, "cooldown")
-        if epoch is None:
-            reason = "disabled" if self.client.disabled else "not_ready"
-            return self._fail_round(bv, reason)
-        entries: list[wire.ReqEntry] = []
-        spans: list[tuple[int, int, int]] = []
-        resync = False
-        n_out = self.n_out_for(n)
-        for i in range(n):
-            s = int(bv.slots[i])
-            st = slots[s]
-            v = int(g.valid[i])
-            anchor_pos = int(anchors_pos[i])
-            flags = wire.RF_NEED_DRAFT if bv.need_draft[i] else 0
-            first, k = int(g.first_pos[i]), v
-            if st.dirty or not st.announced:
-                # the worker's window is unknown or new: (re)send the whole ring window,
-                # which already holds this round's rows (CONTRACT 7.4)
-                flags |= wire.RF_NEW_GEN
-                if not st.rng.empty:
-                    pos = st.rng.positions(anchor_pos)
-                    if (pos.start, len(pos)) != (first, k):
-                        first, k = pos.start, len(pos)
-                        flags |= wire.RF_RESYNC
-                        resync = True
-            if k == 0:
-                # nothing to send for this request (cannot happen for a scheduled
-                # request); an empty NEW_GEN entry would only fail BAD_ENTRY
-                return self._fail_round(bv, "no_rows")
-            entries.append(wire.ReqEntry(slot=s, generation=st.generation, first_pos=first,
-                                         n_rows=k, anchor_token=int(g.anchor[i]),
-                                         anchor_pos=anchor_pos, flags=flags,
-                                         k_window=int(min(bv.k_window[i], 255)),
-                                         n_out=n_out))
-            spans.append((s, first, k))
-        n_rows = sum(e.n_rows for e in entries)
-        if resync:
-            if self.async_mode:
-                # the whole message is rebuilt from the ring: every slot's window must have been
-                # staged by the engine stream this round; otherwise ask for it and fail this round
-                need = {sl for sl, _, _ in spans}
-                if not need <= self._staged:
-                    with self._resync_lock:
-                        self._resync_req |= need
-                    return self._fail_round(bv, "resync_pending")
-                got = self._rows_from_staged(n, spans)
-            else:
-                got = self.gatherer.gather_from_ring(n, spans)
-            if got != n_rows:
-                raise RuntimeError(f"resync gathered {got} rows, expected {n_rows}")
-            self.stats.inc("resync_rounds")
-            self.stats.inc("resync_rows", n_rows)
-        elif n_rows != g.n_valid:
-            raise RuntimeError(f"{n_rows} rows to send but {g.n_valid} valid rows staged")
-        step_flags = wire.SF_WANT_MARGIN if self.cfg.want_margin else 0
-        out: StepOutcome = self.client.step(self.gatherer.msg_np, entries, n_rows,
-                                            step_id=step_id, step_flags=step_flags, epoch=epoch)
-        if not out.ok:
-            if out.reason not in ("not_ready", "disabled", "reconnected"):   # sent, and failed
-                self._breaker_record(False, out.reason or "unknown")
-            return self._fail_round(bv, out.reason or "unknown")
-        self.stats.observe("rtt_us", out.rtt_us)
-        self.stats.observe("worker_us", out.reply.worker_us)
-        self.stats.inc("rows_sent", n_rows)
-        if n_out:
-            self.stats.inc("rounds_n_out_cut")
-        status = self._accept_reply(bv, entries, out.reply, res)
-        needed = bv.need_draft[:n].astype(bool)
-        if needed.any():
-            # failed for the breaker when every request that needed drafts failed on the
-            # worker. A round with nothing to draft (prefill appends only) never exercises
-            # drafting: neutral, so it neither resets the count nor closes a probe
-            usable = np.isin(out.reply.status, list(wire.USABLE_REQ_STATUS))
-            self._breaker_record(bool(usable[needed].any()), "every request failed")
-        return status
-
-    def _breaker_record(self, ok: bool, why: str) -> None:
-        assert self.breaker is not None
-        change = self.breaker.record(ok)
-        if change is None:
-            return
-        self.stats.set("breaker", self.breaker.snapshot())
-        if change == "tripped":
-            self.stats.inc("breaker_trips")
-            log.warning("remote DSpark circuit breaker open (%s; trip %d): no network for the "
-                        "next %d rounds, then one probe", why, self.breaker.trips,
-                        self.breaker.cooldown)
-        else:
-            self.stats.inc("breaker_recoveries")
-            log.info("remote DSpark circuit breaker closed: the probe round succeeded")
-
     # ------------------------------------------------------------------ async mode
 
     def _submit_async(self, input_batch, aux, num_sampled, num_rejected, last_sampled,
@@ -384,12 +457,22 @@ class RemoteRound:
         assert self.gatherer is not None and self.sync is not None and self._q is not None
         t = self.rounds + 1
         tq = time.perf_counter()
+        if self._dead is not None:
+            # the proxy thread is gone: every round is target-only. No hand-off, no wait: the
+            # page holds the failed reply for good (fail_all claimed far ahead; S9 F2)
+            self.rounds = t
+            self.sync.copy_reply(self.bcast)
+            self.stats.inc("fallback_proxy_dead")
+            return
+        if self.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            # a captured wait would replay with a fixed value and pass silently (S9 F6)
+            raise RuntimeError("remote DSpark async round inside CUDA graph capture")
         staged: frozenset[int] = frozenset()
         try:
             bv = batch_view_from_input_batch(input_batch)
             R = self.gatherer.enqueue(bv, list(aux), input_batch.positions, num_rejected,
                                       num_sampled, input_batch.idx_mapping, last_sampled,
-                                      next_prefill_tokens)
+                                      next_prefill_tokens, meta_slot=t % self._meta_slots)
             with self._resync_lock:
                 want = sorted(self._resync_req)
             if want:
@@ -409,177 +492,290 @@ class RemoteRound:
         self.sync.gathered(t)
         self._q.put(item)
         self.sync.wait_release(t)
-        self.bcast.copy_(self.bcast_host, non_blocking=True)
+        self.sync.copy_reply(self.bcast)
+        self.sync.consumed(t)              # explicit consumer acknowledgment of round t's reply
         self.stats.observe("rank0_submit_us", (time.perf_counter() - tq) * 1e6)
+        if item[1] is not None:
+            self.stats.observe(f"rank0_submit_us_{self._phase(item[1])}", (time.perf_counter() - tq) * 1e6)
 
-    def _wait_gathered(self, t: int) -> bool:
-        """Proxy thread: True once the engine stream finished round t's gather; False when
-        stopping. A prefill chunk's forward can take seconds, so there is no give-up."""
-        assert self.sync is not None
-        t0 = time.monotonic()
-        next_log = 30.0
-        while not self._stop.is_set():
-            if self.sync.wait_gathered(t, 0.1):
-                return True
-            waited = time.monotonic() - t0
-            if waited >= next_log:
-                next_log += 30.0
-                log.warning("remote DSpark async: the engine stream has not finished round %d's "
-                            "gather after %.0f s (words: %s)", t, waited, self.sync.values())
-        return False
+    def _submit_process(self, input_batch, aux, num_sampled, num_rejected, last_sampled,
+                        next_prefill_tokens) -> None:
+        """Rank 0, async with the process proxy: as _submit_async, but the round goes to the
+        proxy process through the region's descriptor ring (shmregion.py), and the gather's
+        rows / metadata / staged windows land in the region. Never blocks the CPU."""
+        assert self.gatherer is not None and self.sync is not None and self.proxy is not None
+        assert self.region is not None
+        t = self.rounds + 1
+        tq = time.perf_counter()
+        if self._dead is None:
+            lost = self._proxy_health(t)
+            if lost is not None:
+                self._proxy_lost(lost[1], lost[0])
+        if self._dead is not None and self._respawn is not None:
+            self._respawn_step()                 # never blocks; may bring a new proxy live for this round
+        if self._dead is not None:
+            # no proxy: target-only rounds (zero drafts). The page holds the failed reply (fail_all
+            # claimed far ahead); no wait, no gather. The round number does not advance: it numbers the
+            # rounds handed to a proxy, and a respawned proxy continues from the last of them
+            self.sync.copy_reply(self.bcast)
+            self.stats.inc("fallback_proxy_dead")
+            return
+        if self.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("remote DSpark async round inside CUDA graph capture")
+        bv = None
+        try:
+            bv = batch_view_from_input_batch(input_batch)
+            R = self.gatherer.enqueue(bv, list(aux), input_batch.positions, num_rejected,
+                                      num_sampled, input_batch.idx_mapping, last_sampled,
+                                      next_prefill_tokens, meta_slot=t % self._meta_slots)
+            staged: frozenset[int] = frozenset()
+            want = self.proxy.resync_requests()
+            if want:
+                W, ring = self.W, self.gatherer.ring
+                for sl in want:
+                    self.sync.d2h(self.resync_host[sl], ring[sl * W:(sl + 1) * W])
+                staged = frozenset(want)
+                self.stats.inc("resync_windows_staged", len(want))
+            self.region.write_descriptor(t, bv.n, R, 0, bv.slots, bv.k_window, bv.need_draft,
+                                         staged, bv.req_ids, max_q=bv.longest_query)
+        except Exception as e:
+            # the proxy fails round t (descriptor flag) and releases it with a failed reply
+            self.stats.inc("fallback_internal_error")
+            log.exception("remote DSpark async enqueue failed: %s", e)
+            self.region.write_descriptor(t, 0, 0, F_ENQUEUE_FAILED, (), (), (), frozenset(), [])
+        self.rounds = t
+        self.proxy.publish_head(t)
+        # stream order: the gather's copies (and staged windows), then the word the proxy waits for
+        self.sync.gathered(t)
+        self.sync.wait_release(t)
+        self.sync.copy_reply(self.bcast)
+        self.sync.consumed(t)              # explicit consumer acknowledgment of round t's reply
+        self.sync.watchdog_mirror(self.region.word(C_WD))
+        self.stats.observe("rank0_submit_us", (time.perf_counter() - tq) * 1e6)
+        if bv is not None:
+            self.stats.observe(f"rank0_submit_us_{self._phase(bv)}", (time.perf_counter() - tq) * 1e6)
+        every = self.cfg.log_every
+        if t == 1 or (every > 0 and t % every == 0):
+            self.proxy.publish_engine_stats(self.stats.snapshot())
+
+    def _proxy_lost(self, reason: str, kind: str) -> None:
+        """The proxy process is gone or stalled: fail every pending and later round (the same far-ahead fail-all a
+        dying proxy thread does), SIGKILL it without waiting for it (S11 P-6), record it, and plan its replacement
+        (S11 P-4) while the respawn budget lasts; then target-only rounds until a new proxy runs."""
+        assert self.proxy is not None
+        self.stats.inc(f"proxy_lost_{kind}")
+        self.sync.fail_all(self.rounds + FAR_AHEAD)
+        self._dead = reason
+        self.proxy.signal_kill()
+        now = time.monotonic()
+        self._losses.append({"round": self.rounds, "time": round(time.time(), 3), "kind": kind, "reason": reason,
+                             "pid": self.proxy.pid, "generation": self._generation})
+        del self._losses[:-LOSSES_KEPT]
+        self.stats.set("async_dead", reason)
+        self.stats.set("async_proxy_losses", list(self._losses))
+        reset_s = self.cfg.async_respawn_reset_s
+        if reset_s and now - self._live_since >= reset_s:
+            self._respawns_left = self.cfg.async_respawns      # it served long enough: the full budget again
+        if self._respawns_left > 0:
+            self._respawn = _Respawn(old=self.proxy, drain=self.sync.drain_marker(), lost_at=now,
+                                     due=now + RESPAWN_DELAY_S)
+            log.error("remote DSpark async proxy process %d lost (%s): target-only rounds (zero drafts) until a new "
+                      "proxy process runs (%d respawn(s) left)", self.proxy.pid, reason, self._respawns_left)
+            self._respawn_stats("waiting")
+        else:
+            self._respawn = None
+            self._respawn_exhausted(reason)
+        self._write_engine_stats_file()
+
+    def _respawn_exhausted(self, why: str) -> None:
+        log.error("remote DSpark async proxy process lost (%s) and its respawn budget is spent (%d per %s): "
+                  "target-only rounds (zero drafts) for the rest of this engine run", why, self.cfg.async_respawns,
+                  f"{self.cfg.async_respawn_reset_s} s of service" if self.cfg.async_respawn_reset_s else "run")
+        self._respawn_stats("exhausted")
+
+    def _respawn_stats(self, state: str) -> None:
+        self.stats.set("async_respawns", self._respawn_count)
+        self.stats.set("async_respawn", {"state": state, "limit": self.cfg.async_respawns,
+                                         "left": self._respawns_left, "failed_starts": self._respawn_failures,
+                                         "reset_s": self.cfg.async_respawn_reset_s})
+
+    def _respawn_step(self) -> None:
+        """No proxy (S11 P-4): advance its replacement; called once per submit, never blocks. A new proxy is started
+        only when (1) the lost one has been reaped (a killed process runs no more user code, but until it is reaped
+        it may be finishing a system call), (2) the engine stream has passed every operation of the lost proxy's
+        rounds (an event query, never a stream sync), and (3) RESPAWN_DELAY_S has passed. Then every hand-off word is
+        reset to the last round handed out and the new proxy is started with a new worker session: its HELLO makes
+        the worker drop every window, and its empty slot table announces every slot anew (NEW_GEN). It goes live at
+        the first submit that finds its start reported. Requests in flight then draft from the rows gathered since
+        (target-only rounds gather nothing), a partial window that refills within W positions."""
+        r = self._respawn
+        now = time.monotonic()
+        if r.new is not None:
+            state, why = r.new.start_status()
+            if state == "ok":
+                self._respawn_live(r.new, now)
+                return
+            limit = START_TIMEOUT_S + self.cfg.connect_timeout_ms / 1000
+            if state == "pending":
+                if now - r.started_at < limit:
+                    return
+                why = f"remote DSpark proxy process did not start within {limit:.0f} s"
+            r.new.signal_kill()
+            self._respawn_failures += 1
+            log.error("remote DSpark async proxy respawn %d failed: %s", self._generation, why)
+            r.old, r.new, r.due = r.new, None, now + RESPAWN_DELAY_S
+            if self._respawns_left <= 0:
+                self._respawn = None
+                self._respawn_exhausted(why)
+            else:
+                self._respawn_stats("waiting")
+            return
+        if now < r.due:
+            return
+        if r.old.exit_code() is None:
+            if not r.warned and now - r.lost_at > 10:
+                r.warned = True
+                log.error("remote DSpark: proxy process %d has not exited %.0f s after SIGKILL (uninterruptible "
+                          "sleep?); no new proxy until it has", r.old.pid, now - r.lost_at)
+            return
+        if not self.sync.drained(r.drain):
+            return
+        self._respawns_left -= 1
+        self._generation += 1
+        self._session = _new_session(self._session)
+        base = self.rounds
+        self._reset_hand_off(base)
+        try:
+            r.new = ProxyProcess(self.region, self.sync.lib,
+                                 self._proxy_init(start_round=base + 1, strict=False,
+                                                  base_counters=self._proxy_counters()))
+        except OSError as e:
+            self._respawn_failures += 1
+            log.error("remote DSpark async proxy respawn %d: cannot start a process: %s", self._generation, e)
+            r.due = now + RESPAWN_DELAY_S
+            if self._respawns_left <= 0:
+                self._respawn = None
+                self._respawn_exhausted(str(e))
+            else:
+                self._respawn_stats("waiting")
+            return
+        r.started_at = now
+        self._respawn_stats("starting")
+        log.warning("remote DSpark: starting proxy process %d (respawn %d, session %#010x, rounds from %d)",
+                    r.new.pid, self._generation, self._session, base + 1)
+
+    def _respawn_live(self, new: ProxyProcess, now: float) -> None:
+        self.proxy = new
+        self._respawn = None
+        self._dead = None
+        self._respawn_count += 1
+        self._live_since = now
+        self._proxy_info.update(pid=new.pid, generation=self._generation)
+        self.stats.set("async_proxy", dict(self._proxy_info))
+        self.stats.set("async_dead", None)
+        self._respawn_stats("live")
+        self._health_reset()
+        self.proxy.publish_engine_stats(self.stats.snapshot())
+        log.warning("remote DSpark async proxy process %d running (respawn %d, session %#010x): drafting resumes at "
+                    "round %d", new.pid, self._generation, self._session, self.rounds + 1)
+
+    def _reset_hand_off(self, base: int) -> None:
+        """Respawn: every hand-off word to base, the last round handed to a proxy, so the new proxy serves base + 1
+        on. Only with no proxy process alive and the stream past every operation of earlier rounds. The watchdog keeps
+        running: gathered goes first and released last but one, so it never sees a gathered-unreleased round (claimed
+        and released come down from the fail-all's far-ahead value; nothing waits on them now)."""
+        lib, sync, reg = self.sync.lib, self.sync, self.region
+        b = base & _M32
+        for addr in (sync.gathered_host, sync.claimed_host, sync.released_host, sync.consumed_host):
+            lib.dsv41_hf_set(_V(addr), b)
+        for off, v in ((C_DESC_HEAD, b), (C_DESC_TAIL, b), (C_DONE, b), (C_STOP, 0), (C_START, R_PENDING),
+                       (C_STATE, S_STARTING), (C_PID, 0), (C_FLUSH_REQ, 0), (C_FLUSH_ACK, 0), (C_ENGINE_SEQ, 0),
+                       (C_HEARTBEAT, monotonic_ms())):
+            lib.dsv41_hf_set(_V(reg.word(off)), v)
+        reg.resync_flags[:] = 0
+        reg.set_start_reason("")
+
+    def _proxy_counters(self) -> dict:
+        """The lost proxies' counters from the stats file (as last written), carried on by the next proxy."""
+        if not self.cfg.stats_file:
+            return {}
+        try:
+            with open(self.cfg.stats_file) as f:
+                return dict(unmerge_snapshot(json.load(f)).get("counters") or {})
+        except (OSError, ValueError) as e:
+            log.warning("remote DSpark stats file %s unreadable at respawn (%s): the new proxy's counters start at 0",
+                        self.cfg.stats_file, e)
+            return {}
+
+    def _write_engine_stats_file(self) -> None:
+        """Without a live proxy the engine writes the stats file: the proxy's last one merged
+        with this side's counters."""
+        if not self.cfg.stats_file:
+            return
+        self.stats.set("rounds", self.rounds)
+        self.stats.set("async_watchdog", self.sync.watchdog_stats())
+        proxy_snap: dict = {}
+        try:
+            with open(self.cfg.stats_file) as f:
+                proxy_snap = unmerge_snapshot(json.load(f))
+        except (OSError, ValueError):
+            pass
+        for k in ("rounds", "async_watchdog"):    # this side's values are current
+            proxy_snap.pop(k, None)
+        try:
+            write_json_atomic(self.cfg.stats_file,
+                              merge_snapshots(proxy_snap, self.stats.snapshot()))
+        except OSError as e:
+            log.warning("remote DSpark stats file %s: %s", self.cfg.stats_file, e)
 
     def _async_main(self) -> None:
-        """Proxy thread. CPU only: no CUDA call of any kind (streamsync.py)."""
+        """Proxy thread. CPU only: no CUDA or torch call (streamsync.py). Any exit other than the
+        sentinel or close() fails every pending and later round (S9 F2)."""
         assert self._q is not None and self.sync is not None
-        while True:
-            item = self._q.get()
-            if item is None:
-                return
-            t, bv, R, staged = item
-            with self._resync_lock:
-                self._resync_req -= staged     # a request made below persists to the next round
-            t0 = time.perf_counter()
-            try:
-                if not self._wait_gathered(t):
-                    return                      # stopping (finally releases t)
-                self.stats.observe("gather_us", (time.perf_counter() - t0) * 1e6)
-                if bv is None:
-                    raise RuntimeError("enqueue failed on the engine thread")
-                g = self.gatherer.collect(bv.n, R)
-                res = RoundResult(n=bv.n, bcast=self.bcast, layout=self.layout)
-                self._staged = staged
-                self._after_gather(bv, g, res, step_id=t)
-            except Exception as e:  # the stream must always be released
-                n = bv.n if bv is not None else 0
-                self._pack_failed(n)
-                if bv is not None:
-                    self.stats.inc("fallback_internal_error")
-                if self.slots is not None:
-                    self.slots.mark_all_dirty()
-                now = time.monotonic()
-                if now - self._err_logged > 10.0:
-                    self._err_logged = now
-                    log.exception("remote DSpark async round %d failed: %s", t, e)
-            finally:
-                self._staged = frozenset()
-                self.sync.release(t)
-            self.stats.observe("rank0_round_us", (time.perf_counter() - t0) * 1e6)
-            self._maybe_log()
+        set_timer_slack()                   # short naps (ASYNC_NAP_US > 0) wake on time
+        try:
+            while True:
+                item = self._q.get()
+                if item is None or not self._async_round(item):
+                    return                       # sentinel, or stopping inside a round (close)
+        except BaseException as e:  # noqa: BLE001 -- whatever ends the thread must not park the GPU
+            self._die(f"{type(e).__name__}: {e}")      # the thread ends here, failed closed
 
-    def _rows_from_staged(self, n_req: int, spans: list[tuple[int, int, int]]) -> int:
-        """Async resync: the STEP rows for spans [(slot, first_pos, n_rows)] from the windows
-        the engine stream staged (= gatherer.gather_from_ring on the CPU, same ring indexing)."""
-        assert self.gatherer is not None
-        g, W = self.gatherer, self.W
-        total = sum(k for _, _, k in spans)
-        if total > g.max_rows:
-            raise ValueError(f"{total} resync rows > max_rows {g.max_rows}")
-        off = wire.APP_HEADER_SIZE + wire.rows_offset_for(n_req)
-        rows = g.msg_np[off:off + total * g.row_bytes].reshape(total, g.row_bytes)
-        o = 0
-        for sl, p, k in spans:
-            rows[o:o + k] = self.resync_np[sl][(p + np.arange(k, dtype=np.int64)) % W]
-            o += k
-        return total
+    def write_stats(self) -> None:
+        if self.proxy is None:
+            return RoundCore.write_stats(self)
+        if self._dead is not None:
+            return self._write_engine_stats_file()
+        self.proxy.publish_engine_stats(self.stats.snapshot())
+        if not self.proxy.flush():
+            log.warning("remote DSpark proxy process did not write the stats file within 2 s")
 
     def close(self) -> None:
+        if self.proxy is not None:
+            if self._dead is None:
+                self.proxy.publish_engine_stats(self.stats.snapshot())
+            procs = [self.proxy]
+            if self._respawn is not None and self._respawn.new is not None:
+                procs.append(self._respawn.new)          # a respawned proxy still starting
+            for p in procs:
+                if p.stop(5.0) is None:
+                    log.error("remote DSpark proxy process %d did not stop within 5 s (killed)", p.pid)
+            # nothing may stay parked on a round the stopped proxy never released
+            self.sync.fail_all(self.rounds + FAR_AHEAD)
+            if self._dead is not None:
+                self._write_engine_stats_file()
+            return
         if self._q is not None:
             self._stop.set()
             self._q.put(None)
             self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                log.error("remote DSpark async proxy thread did not stop within 5 s (a round in "
+                          "flight); failing every pending round")
             if self.sync is not None:
-                # nothing may stay parked on a round the stopped thread never released; the
-                # reply bytes do not matter then (drafts never change verified output)
-                self.sync.release(self.rounds)
+                # nothing may stay parked on a round the stopped thread never released. Monotonic
+                # and claimed far ahead: a late proxy can neither publish nor move the word back
+                self.sync.fail_all(self.rounds + FAR_AHEAD)
         if self.client is not None:
             self.client.close()
 
-    def _fail_round(self, bv: BatchView, reason: str) -> int:
-        assert self.slots is not None
-        for s in bv.slots:
-            self.slots[int(s)].dirty = True
-        self.stats.inc(f"fallback_{reason}")
-        self.stats.inc("rounds_failed")
-        self._pack_failed(bv.n)
-        return STATUS_ROUND_FAILED
-
-    def _accept_reply(self, bv: BatchView, entries: list[wire.ReqEntry],
-                      reply: wire.StepReply, res: RoundResult) -> int:
-        assert self.slots is not None
-        n, N, L = bv.n, self.N, self.layout
-        self._bcast_writable()
-        b = self.bcast_np
-        b[:] = 0
-        b[1] = n
-        okm = b[L.o_ok:L.o_ok + n]
-        ids = b[L.o_ids:L.o_ids + n * N].reshape(n, N)
-        conf = b[L.o_conf:L.o_conf + n * N].view(np.float32).reshape(n, N)
-        all_ok = True
-        for i, e in enumerate(entries):
-            rs = int(reply.status[i])
-            st = self.slots[e.slot]
-            self.stats.inc(f"req_status_{wire.REQ_STATUS_NAMES.get(rs, rs)}".lower())
-            usable = rs in wire.USABLE_REQ_STATUS
-            if usable:
-                st.announced = True
-                # a partial window is resent only if the ring holds more than the worker
-                # has; otherwise it is genuine (rows never existed) and only counted
-                st.dirty = (rs == wire.RS_PARTIAL_WINDOW
-                            and int(reply.window_rows[i]) < st.rng.rows_for_anchor(
-                                e.anchor_pos))
-            else:
-                st.dirty = True
-            if not bv.need_draft[i]:
-                continue
-            if usable:
-                okm[i] = 1
-                ids[i] = reply.draft_ids[i]
-                conf[i] = reply.confidence[i]
-            else:
-                all_ok = False
-        res.reply = reply
-        stale = [e.slot for i, e in enumerate(entries)
-                 if int(reply.status[i]) == wire.RS_STALE_GENERATION]
-        if stale:
-            # rank 0's generations only grow (CONTRACT 7.1), so the worker's slot state does
-            # not match ours; a resync under the same session would stay stale
-            self.stats.inc("stale_generation_new_sessions")
-            self.client.new_session(f"worker reported STALE_GENERATION for slots {stale}")
-        self.stats.inc("rounds_ok")
-        status = STATUS_OK if all_ok else STATUS_SOME_FAILED
-        if not all_ok:
-            self.stats.inc("rounds_some_failed")
-        b[0] = status
-        return status
-
-    # ------------------------------------------------------------------ logging
-
-    def _maybe_log(self) -> None:
-        every = self.cfg.log_every
-        if every <= 0 or self.rounds % every:
-            return
-        if self.breaker is not None:
-            self.stats.set("breaker", self.breaker.snapshot())
-        snap = self.stats.snapshot()
-        snap["rounds"] = self.rounds
-        c = snap["counters"]
-        lat = snap["latency"]
-        log.info(
-            "remote DSpark %s: %d rounds, ok %d, failed %d, resync %d; rtt p50/p99 %s/%s us, "
-            "worker p50 %s us, gather p50 %s us, rank-0 round p50 %s us",
-            self.cfg.policy, self.rounds, c.get("rounds_ok", 0), c.get("rounds_failed", 0),
-            c.get("resync_rounds", 0), lat.get("rtt_us", {}).get("p50_us"),
-            lat.get("rtt_us", {}).get("p99_us"), lat.get("worker_us", {}).get("p50_us"),
-            lat.get("gather_us", {}).get("p50_us"), lat.get("rank0_round_us", {}).get("p50_us"))
-        self.write_stats()
-
-    def write_stats(self) -> None:
-        if not self.is_sender or not self.cfg.stats_file:
-            return
-        self.stats.set("rounds", self.rounds)
-        if self.breaker is not None:
-            self.stats.set("breaker", self.breaker.snapshot())
-        try:
-            self.stats.write_json(self.cfg.stats_file)
-        except OSError as e:
-            log.warning("remote DSpark stats file %s: %s", self.cfg.stats_file, e)
