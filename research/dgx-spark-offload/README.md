@@ -68,6 +68,11 @@ Combined entry on Hugging Face: https://huggingface.co/ProprietaryLegal/DeepSeek
 - Launcher: [sudoingX/dgx-spark-deepseek-v41](https://github.com/sudoingX/dgx-spark-deepseek-v41) @ cc59c36. Our copy also
   accepts extra docker arguments for the overlays.
 - exllamav3 1.6.0 (EXL3).
+- Our forks with the changes, on branch `pli/dgx-spark-offload`:
+  [ProprietaryLegal/deepseek-v41-1017-dgx-spark](https://github.com/ProprietaryLegal/deepseek-v41-1017-dgx-spark) (the
+  offload code beside the image's patch set) and
+  [ProprietaryLegal/dgx-spark-deepseek-v41](https://github.com/ProprietaryLegal/dgx-spark-deepseek-v41) (two launcher
+  hooks, inert by default).
 
 ## What runs where (production configuration "D-kv6")
 
