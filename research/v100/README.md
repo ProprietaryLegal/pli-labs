@@ -26,6 +26,14 @@ private topology or operational runbooks.
   Gemma lane, KV-quant-at-depth guidance, and published negative results —
   including an honest single-card dense regression from our own tuned build.
 
+- [Swift 1.5 on 4x V100](https://github.com/ProprietaryLegal/swift-1.5-v100)
+  - **Swift 1.5 / Qwen3.8-27B serving recipe (1Cat-vLLM 1.5.1, TP4)** and a
+  measured A/B against the Qwen3.8-27B QUASAR NVFP4 build: equal decode speed
+  (~248 tok/s at a 12K prompt), equal DFlash2 acceptance on real legal work,
+  and on six blind-graded family-law drafting tasks 4 tied, 2 better, 0 worse
+  with 52% fewer completion tokens. Hugging Face:
+  [swift-1.5-27b-v100-serving](https://huggingface.co/ProprietaryLegal/swift-1.5-27b-v100-serving).
+
 - [MASTER-PLAN.md](MASTER-PLAN.md) - public action plan for V100-class serving.
 - [findings/current-stack.md](findings/current-stack.md) - public constraints
   for V100-class inference.

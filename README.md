@@ -33,6 +33,9 @@ Start here:
 - [research/b70/README.md](research/b70/README.md) - Intel Arc Pro B70
   inference research, sanitized stack findings, and legal-context benchmark
   bands.
+- [Swift 1.5 on 4x V100](https://github.com/ProprietaryLegal/swift-1.5-v100) - 1Cat-vLLM 1.5.1 serving recipe for
+  Swift 1.5 (a Qwen3.8-27B fine-tune) on four V100-SXM2-32GB, and a blind A/B against Qwen3.8-27B: same quality on six
+  legal-drafting tasks at about half the reasoning ([Hugging Face](https://huggingface.co/ProprietaryLegal/swift-1.5-27b-v100-serving)).
 - [research/dgx-spark-offload/README.md](research/dgx-spark-offload/README.md) - DeepSeek-V4.1-Flash on
   2x DGX Spark with an x86 offload host: remote Engram over RDMA, RTX 3090 drafter + KV, NVLink drafter,
   GB10 async deadlock finding, transport and benchmark tools (each with its own README and code).
