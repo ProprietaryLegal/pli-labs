@@ -8,7 +8,7 @@ pair of RTX 3090s. Overview: [DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload](https
 **Status (updated 2026-10-23):**
 - Proven in-engine on GB10. On its own it gives −0.6 to −2.6 % per decode round.
 - With the [async process proxy](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff) it gives **−3.9 to
-  −6.5 % per round** against the one-card synchronous production setup, with time to first token at parity.
+  −6.3 % per round** against the one-card synchronous production setup, with time to first token at parity.
 - The illegal-address crash an earlier review reported is root-caused and fixed (below).
 - Window 5 (2026-10-23) repeated the window-4 numbers on the reviewed code and passed the supervised fault drills.
 - Production uses async rounds with the one-card worker since 2026-10-23. Promoting the two-card worker waits until
@@ -51,10 +51,10 @@ production setup at the time):
 
 | workload | one card, sync | two cards, sync | two cards + async process proxy |
 |---|---|---|---|
-| short × 3, step (ms) | 39.6 / 40.1 / 39.4 | 39.0 / 38.9 / 38.9 (−1.8 %) | 37.1 / 37.4 / 36.9 (**−6.5 %**) |
-| 32K × 3, step (ms) | 41.2 / 42.2 / 42.3 | 41.6 / 41.5 / 41.6 (−0.6 %) | 39.6 / 39.5 / 40.2 (**−4.5 %**) |
+| short × 3, step (ms) | 39.6 / 40.1 / 39.4 | 39.0 / 38.9 / 38.9 (−1.8 %) | 37.1 / 37.4 / 36.9 (**−6.3 %**) |
+| 32K × 3, step (ms) | 41.2 / 42.2 / 42.3 | 41.6 / 41.5 / 41.6 (−0.6 %) | 39.6 / 39.5 / 40.2 (**−5.2 %**) |
 | 32K, 3 concurrent, step (ms) | 75.9 / 76.1 / 76.1 | 74.9 / 75.1 / 74.8 (−1.4 %) | 72.8 / 73.5 / 73.0 (**−3.9 %**) |
-| 150K × 2, step (ms) | 41.5 / 42.2 | 40.7 / 41.4 (−1.9 %) | 39.6 / 39.8 (**−5.0 %**) |
+| 150K × 2, step (ms) | 41.5 / 42.2 | 40.7 / 41.4 (−1.9 %) | 39.6 / 39.8 (**−5.1 %**) |
 
 Worker step p50 2.55 ms, p99 3.47 ms, over 6,284 steps.
 
