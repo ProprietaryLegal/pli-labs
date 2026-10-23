@@ -138,7 +138,7 @@ Details: [async entry](https://huggingface.co/ProprietaryLegal/dsv41-async-hostf
 | `CUDA_MODULE_LOADING=EAGER` for async safety | insufficient: Triton loads modules explicitly | measured (gdb) |
 | `CUDA_MODULE_LOADING=EAGER` against the async TTFT cost | not the cause; +18 min per serve start | measured |
 | a shorter interpreter switch interval for the proxy thread | not the cause of the TTFT cost | measured |
-| the two-card drafter alone, synchronous | −0.6 to −2.6 % per round: real but small without async | measured |
+| the two-card drafter alone, synchronous | −0.8 to −2.6 % per round: real but small without async | measured |
 
 ## 7. NVLink pair: peer buffers in PyTorch's expandable segments cause illegal addresses (measured)
 
