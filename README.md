@@ -39,9 +39,6 @@ Start here:
 
 ## Repository Boundaries
 
-- [research/dgx-spark-offload/README.md](research/dgx-spark-offload/README.md) - DeepSeek-V4.1-Flash on
-  2x DGX Spark with an x86 offload host: remote Engram over RDMA, RTX 3090 drafter + KV, NVLink drafter,
-  GB10 async deadlock finding, transport and benchmark tools (each with its own README and code).
 - PLI Labs is distinct from private law-practice automation and client work.
 - Public-release work should be separable from private client materials,
   attorney-client communications, and privileged work product.
