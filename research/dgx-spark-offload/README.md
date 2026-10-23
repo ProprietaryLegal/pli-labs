@@ -12,7 +12,10 @@ documentation; it contains no model weights. The served model is the public
 - **New (2026-10-23):**
   - The two-card drafter with async rounds measures **3.9–6.5 % faster per decode round** than that production setup on
     GB10, with time to first token unchanged. Window 5 confirmed it and passed supervised fault drills.
-  - **Async rounds have been in production since 2026-10-23** with the one-card drafter. The two-card worker follows.
+  - **Async rounds have been in production since 2026-10-23 13:56Z** with the one-card drafter. Production checks
+    passed: ready in 363 s; short TTFT 0.37–0.38 s; step p50 38.4–38.5 ms short and 40.5 ms at 32K; greedy outputs
+    6 / 6 identical; 2,048 rounds with 0 failed and 0 watchdog fires. The first 32K request after a restart pays a one-time
+    loading cost (16.24 s vs ~14.5 s). The two-card worker follows.
   - Four 32K requests at once: about **119 tok/s combined decode** (51.7 tok/s overall, prefill included).
 
 The model stays on the Sparks. An x86 host contributes RAM, two RDMA links and RTX 3090s.
