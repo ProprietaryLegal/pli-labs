@@ -68,6 +68,8 @@ def load_ofl():
 def _addr(buf) -> tuple[int, int]:
     """Address and length of a contiguous writable buffer (bytearray, numpy, memoryview)."""
     if hasattr(buf, "ctypes") and hasattr(buf, "nbytes"):
+        if not buf.flags.c_contiguous:
+            raise TransportError("buffer must be contiguous")
         return int(buf.ctypes.data), int(buf.nbytes)
     mv = memoryview(buf)
     if mv.readonly:
@@ -138,14 +140,42 @@ class O1Client(RpcClient):
         return region, n
 
     def request(self, msg, resp_buf, timeout_s: float) -> int:
-        c = self._c
-        if c is None:
+        if self._c is None:
             raise TransportError("not connected")
-        region, cap = self._region_for(resp_buf)
         addr, n = _addr(msg)
         if n > self.max_req:
             raise TransportError(f"message of {n} B > ofl max_req {self.max_req}")
         op, seq = _OP_SEQ.unpack_from(memoryview(msg).cast("B"), 6)
+        return self._call(addr, n, op, seq, resp_buf, timeout_s)
+
+    def request_parts(self, parts, resp_buf, timeout_s: float) -> int:
+        """The parts are copied straight into ofl's send slot (ofl_client_payload_buf), and the call then skips its own
+        payload copy: the same single copy request() costs, with no joined buffer in between."""
+        c = self._c
+        if c is None:
+            raise TransportError("not connected")
+        spans = [_addr(p) for p in parts]
+        n = sum(k for _, k in spans)
+        if n > self.max_req:
+            raise TransportError(f"message of {n} B > ofl max_req {self.max_req}")
+        if not spans or spans[0][1] < _OP_SEQ.size + 6:
+            raise TransportError("the first part must hold the AppHeader")
+        op, seq = _OP_SEQ.unpack_from(memoryview(parts[0]).cast("B"), 6)
+        pl, cap = c.payload_buf()
+        if not pl:
+            self.close()
+            raise TransportError("ofl connection is broken (no payload slot)")
+        if n > cap:
+            raise TransportError(f"message of {n} B > ofl payload slot {cap} B")
+        off = 0
+        for a, k in spans:
+            ctypes.memmove(pl + off, a, k)
+            off += k
+        return self._call(pl, n, op, seq, resp_buf, timeout_s)
+
+    def _call(self, addr: int, n: int, op: int, seq: int, resp_buf, timeout_s: float) -> int:
+        c = self._c
+        region, cap = self._region_for(resp_buf)
         seg = self._seg
         seg[0].region, seg[0].offset, seg[0].len = region, 0, min(cap, self.max_resp)
         L = self.ofl.lib()

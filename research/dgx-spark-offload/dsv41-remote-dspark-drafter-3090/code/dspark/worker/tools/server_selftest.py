@@ -11,7 +11,9 @@
 5. Rollback (n_rows = 0 to an earlier anchor) and PARTIAL_WINDOW on a fresh short window.
 6. Latency over the wire: an ofl server on 10.202.28.1:<port> (RDMA + TCP backends) and an ofl client on x86host
    (10.202.28.1 -> itself), decode STEPs of 1 and 4 requests: round trip p50 / p99 vs in-process handle time.
-Writes argv[2] (JSON). Usage: python -m worker.tools.server_selftest ROOT OUT.json [port]
+Writes argv[2] (JSON). Usage: python -m worker.tools.server_selftest ROOT OUT.json [port] [tp]
+tp = 2 (lane E): the TP = 2 worker on the NVLink pair (or, with DSPARK_WORKER_TP_EMULATE=1, both ranks on one card);
+the shadow calls then go through TPDrafter's host-input graph API.
 """
 
 from __future__ import annotations
@@ -51,6 +53,50 @@ class Client:
         return h, rep[P.APP_HDR.size:]
 
 
+class Shadow1:
+    """Direct calls on the one-card model (model.py)."""
+
+    def __init__(self, m):
+        self.m, self.dev, self.embed = m, m.dev, m.embed
+
+    def reset(self, slot):
+        self.m.reset_slots(torch.tensor([slot], device=self.dev))
+
+    def insert(self, slot, p0, n, taps):
+        sr = torch.full((n,), slot, dtype=torch.int64, device=self.dev)
+        pr = torch.arange(p0, p0 + n, device=self.dev)
+        tt = torch.from_numpy(taps[p0:p0 + n].copy()).to(self.dev).view(torch.bfloat16).view(n, -1)
+        self.m.insert_taps_graphed(sr, pr, tt)
+
+    def draft(self, slot, anchor_tok, anchor_pos, lo, N):
+        s = torch.tensor([slot], device=self.dev)
+        ids, conf = self.m.draft_graphed(s, torch.tensor([anchor_tok], device=self.dev),
+                                         torch.tensor([anchor_pos - 1], device=self.dev), N,
+                                         ctx_lo=torch.tensor([lo], device=self.dev))
+        return ids[0].cpu().numpy().astype(np.int32), conf[0].cpu().numpy()
+
+
+class ShadowTP:
+    """Direct calls on the TP = 2 model (tp2.TPDrafter): host (pinned) inputs."""
+
+    def __init__(self, m):
+        self.m, self.dev, self.embed = m, m.dev, m.ranks[0].embed
+
+    def reset(self, slot):
+        self.m.reset_slots([slot])
+
+    def insert(self, slot, p0, n, taps):
+        sr = torch.full((n,), slot, dtype=torch.int64).pin_memory()
+        pr = torch.arange(p0, p0 + n).pin_memory()
+        tt = torch.from_numpy(taps[p0:p0 + n].copy()).view(torch.bfloat16).view(n, -1).pin_memory()
+        self.m.insert_taps_graphed(sr, pr, tt)
+
+    def draft(self, slot, anchor_tok, anchor_pos, lo, N):
+        inp = torch.tensor([[slot], [anchor_tok], [anchor_pos - 1], [lo]], dtype=torch.int64).pin_memory()
+        ids, conf, _ = self.m.draft_graphed(inp, N)
+        return ids[0].cpu().numpy().astype(np.int32), conf[0].cpu().numpy()
+
+
 def taps_for(model, toks: torch.Tensor, gen: torch.Generator) -> np.ndarray:
     e = model.embed[toks].float()
     t = torch.cat([e * 40.0, e * 70.0, e * 110.0], -1) + torch.randn(e.shape[0], 3 * e.shape[1], generator=gen,
@@ -62,8 +108,10 @@ def main() -> None:
     root = sys.argv[1] if len(sys.argv) > 1 else "/data/dsv41-offload/dspark"
     out_path = sys.argv[2] if len(sys.argv) > 2 else "d4_server_selftest.json"
     port = int(sys.argv[3]) if len(sys.argv) > 3 else 18629
-    rep: dict = {}
-    core, m = build_core(root, graphs=True)
+    tp = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+    rep: dict = {"tp": tp}
+    core, m = build_core(root, graphs=True, tp=tp)
+    sh = ShadowTP(m) if tp == 2 else Shadow1(m)
     exp = core.expected
     dev = m.dev
     rb, N, W = exp.row_bytes, exp.num_spec, exp.window
@@ -83,20 +131,14 @@ def main() -> None:
     rnd = random.Random(7)
     L = 1600
     toks = torch.randint(0, 120000, (L,), generator=gen, device=dev)
-    taps = taps_for(m, toks, gen)
+    taps = taps_for(sh, toks, gen)
     SH = 4                                   # shadow slot (model slots 4..7 are outside the contract's 0..3)
 
     def shadow_insert(slot, p0, n):
-        sr = torch.full((n,), slot, dtype=torch.int64, device=dev)
-        pr = torch.arange(p0, p0 + n, device=dev)
-        tt = torch.from_numpy(taps[p0:p0 + n].copy()).to(dev).view(torch.bfloat16).view(n, -1)
-        m.insert_taps_graphed(sr, pr, tt)
+        sh.insert(slot, p0, n, taps)
 
     def shadow_draft(slot, anchor_pos, lo):
-        s = torch.tensor([slot], device=dev)
-        ids, conf = m.draft_graphed(s, toks[anchor_pos:anchor_pos + 1], torch.tensor([anchor_pos - 1], device=dev), N,
-                                    ctx_lo=torch.tensor([lo], device=dev))
-        return ids[0].cpu().numpy().astype(np.int32), conf[0].cpu().numpy()
+        return sh.draft(slot, int(toks[anchor_pos]), anchor_pos, lo, N)
 
     def step(entries, rows, flags=0):
         body = P.encode_step(1, entries, rows, rb, flags)
@@ -104,7 +146,7 @@ def main() -> None:
         assert h.status == P.OK, P.FRAME_STATUS[h.status]
         return P.decode_step_reply(b)
 
-    m.reset_slots(torch.tensor([SH], device=dev))
+    sh.reset(SH)
     gen0 = 1
     a_pos = 300
     first = a_pos - W

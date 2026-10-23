@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from .donor_adapter import CUDA_EXL3_SHA, TRELLIS_SHA, verify_checkout
@@ -23,6 +24,7 @@ def main() -> None:
     p.add_argument("donor", choices=("trellis", "cuda-exl3"))
     p.add_argument("source", type=Path)
     p.add_argument("build", type=Path)
+    p.add_argument("--resume", action="store_true", help="reuse this lane's partial compiler outputs")
     args = p.parse_args()
     require_gpu_window()
     args.source = args.source.resolve()
@@ -33,7 +35,7 @@ def main() -> None:
     os.environ["MAX_JOBS"] = "2"
     os.environ.setdefault("CUDA_HOME", "/usr/local/cuda")
     from torch.utils.cpp_extension import load
-    args.build.mkdir(parents=True, exist_ok=False)
+    args.build.mkdir(parents=True, exist_ok=args.resume)
     flags = ["-O3", "--use_fast_math", "-lineinfo", "-std=c++17"]
     if args.donor == "trellis":
         name = "trellis_exl3_kernels"
@@ -60,7 +62,24 @@ def main() -> None:
     else:
         name = "_C"
         csrc = args.source / "src/cuda_exl3/csrc"
-        sources = [str(csrc / f) for f in ("bindings.cpp", "hadamard.cu", "gemm.cu", "mla_decode.cu")]
+        # MLA uses SM89 FP8 conversion instructions; it is unrelated to EXL3 GEMM.
+        # Remove only its declaration/registration from a lane-owned binding copy.
+        bindings = (csrc / "bindings.cpp").read_text()
+        for pattern in (r"at::Tensor mla_decode\([\s\S]*?;", r'    m.def\(\n        "mla_decode[\s\S]*?;\n',
+                        r'    m.impl\("mla_decode", &cuda_exl3::mla_decode\);\n'):
+            bindings, count = re.subn(pattern, "", bindings)
+            if count != 1:
+                raise RuntimeError(f"pinned MLA binding exclusion matched {count}, expected 1: {pattern}")
+        dense_binding = args.build / "bindings_dense.cpp"
+        dense_binding.write_text(bindings)
+        sources = [str(dense_binding)] + [str(csrc / f) for f in ("hadamard.cu", "gemm.cu")]
+        # Separate diagnostic binding; donor sources stay unchanged and pinned.
+        binding = args.build / "decode_binding.cpp"
+        binding.write_text('#include <torch/extension.h>\n'
+                           'at::Tensor w1_decode(const at::Tensor&, bool);\n'
+                           'TORCH_LIBRARY(w1_donor, m) { m.def("decode(Tensor tr, bool vector) -> Tensor"); }\n'
+                           'TORCH_LIBRARY_IMPL(w1_donor, CUDA, m) { m.impl("decode", &w1_decode); }\n')
+        sources += [str(Path(__file__).with_name("cuda_exl3_decode.cu")), str(binding)]
         includes = [str(csrc)]
         flags += ["--expt-relaxed-constexpr", "--expt-extended-lambda", "-U__CUDA_NO_HALF_OPERATORS__",
                   "-U__CUDA_NO_HALF_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__",

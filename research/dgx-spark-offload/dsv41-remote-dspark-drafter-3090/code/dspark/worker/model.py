@@ -253,6 +253,7 @@ class DSparkDrafter:
         self.arange_block = torch.arange(s.block + 1, dtype=torch.int64, device=dev)
         self.graphs: dict[tuple[int, int, int], dict] = {}
         self.margin_graphs: dict[tuple[int, int, int], dict] = {}
+        self.reply_graphs: dict[tuple[int, int, int, bool], dict] = {}
         self.insert_graphs: dict[int, dict] = {}
         self.pool = None
         torch.cuda.synchronize(dev)
@@ -495,10 +496,11 @@ class DSparkDrafter:
 
     # ------------------------------------------------------------------------------------------ CUDA graphs
     def capture(self, batch_sizes=(1, 2, 3, 4), ks=(4, 5), insert_rows=(8, 16, 32, 64, 128), n_outs=(4, 5),
-                margins: bool = True) -> float:
+                margins: bool = True, pack_reply: bool = False) -> float:
         """One graph per (B, k, n_out) (n_out in n_outs and <= k; n_out = k always) for the draft step, the same with
         top1 - top2 margins (CONTRACT WANT_MARGIN; shadow mode asks for them) when ``margins``, and one per row
-        bucket for the insert. Returns seconds."""
+        bucket for the insert. ``pack_reply`` adds optional float64 reply twins;
+        default False, so normal capture count and outputs remain unchanged. Returns seconds."""
         t0 = time.time()
         dev = self.dev
         if self.pool is None:
@@ -525,7 +527,9 @@ class DSparkDrafter:
                     torch.cuda.current_stream(dev).wait_stream(s1)
                     torch.cuda.synchronize(dev)
                     gr = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(gr, pool=self.pool):
+                    # A process-wide default capture stream can belong to another device (e.g. TP2 rank 0).
+                    # Keep the pool on this model's stream, regardless of which model captured first.
+                    with torch.cuda.graph(gr, pool=self.pool, stream=s1):
                         ids, conf = self.draft(*args, ctx_lo=lo, n_out=n)
                     self.graphs[(B, k, n)] = {"graph": gr, "ids": ids, "conf": conf}
                     if margins:
@@ -536,9 +540,17 @@ class DSparkDrafter:
                         torch.cuda.current_stream(dev).wait_stream(s1)
                         torch.cuda.synchronize(dev)
                         gr = torch.cuda.CUDAGraph()
-                        with torch.cuda.graph(gr, pool=self.pool):
+                        with torch.cuda.graph(gr, pool=self.pool, stream=s1):
                             ids, conf, mg = self.draft_with_margin(*args, ctx_lo=lo, n_out=n)
                         self.margin_graphs[(B, k, n)] = {"graph": gr, "ids": ids, "conf": conf, "mg": mg}
+                    if pack_reply:
+                        for margin in ((False, True) if margins else (False,)):
+                            gr = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(gr, pool=self.pool, stream=s1):
+                                values = (self.draft_with_margin(*args, ctx_lo=lo, n_out=n) if margin
+                                          else self.draft(*args, ctx_lo=lo, n_out=n))
+                                packed = torch.cat([v.to(torch.float64) for v in values], 1)
+                            self.reply_graphs[(B, k, n, margin)] = {"graph": gr, "packed": packed}
         for n in insert_rows:
             args = (self.gi_slot[:n], self.gi_pos[:n])
             s1.wait_stream(torch.cuda.current_stream(dev))
@@ -548,7 +560,7 @@ class DSparkDrafter:
             torch.cuda.current_stream(dev).wait_stream(s1)
             torch.cuda.synchronize(dev)
             gr = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(gr, pool=self.pool):
+            with torch.cuda.graph(gr, pool=self.pool, stream=s1):
                 self.insert(*args, self.main_x(self.gi_taps[:n]))
             self.insert_graphs[n] = {"graph": gr}
         # the warm-ups wrote into the scratch slot only; keep it empty
@@ -560,15 +572,19 @@ class DSparkDrafter:
         return (B, k, k if n_out is None else n_out) in (self.margin_graphs if margin else self.graphs)
 
     def draft_graphed(self, slots: torch.Tensor, anchors: torch.Tensor, last_pos: torch.Tensor, k: int,
-                      ctx_lo: torch.Tensor | None = None, n_out: int | None = None, margin: bool = False
+                      ctx_lo: torch.Tensor | None = None, n_out: int | None = None, margin: bool = False,
+                      packed_reply: bool = False
                       ) -> tuple[torch.Tensor, ...]:
         """Replay the (B, k, n_out) graph; returns views of the graph's output buffers (ids, conf[, margin]; copy
-        before the next replay). ``margin``: the draft_with_margin graph (same ids and confidences)."""
+        before the next replay). ``margin``: the draft_with_margin graph (same ids and confidences).
+        ``packed_reply`` returns a one-tuple holding the captured float64 wire staging tensor;
+        requires capture(pack_reply=True), including a margin twin when margin=True."""
         B = slots.shape[0]
         n = k if n_out is None else n_out
-        g = (self.margin_graphs if margin else self.graphs).get((B, k, n))
+        g = (self.reply_graphs.get((B, k, n, margin)) if packed_reply
+             else (self.margin_graphs if margin else self.graphs).get((B, k, n)))
         if g is None:
-            raise KeyError(f"no CUDA graph for batch {B}, depth {k}, n_out {n}, margin {margin}")
+            raise KeyError(f"no CUDA graph for batch {B}, depth {k}, n_out {n}, margin {margin}, packed {packed_reply}")
         self.g_slots[:B].copy_(slots, non_blocking=True)
         self.g_anchor[:B].copy_(anchors, non_blocking=True)
         self.g_last[:B].copy_(last_pos, non_blocking=True)
@@ -576,6 +592,8 @@ class DSparkDrafter:
             ctx_lo = (last_pos - (self.s.window - 1)).clamp_min(0)
         self.g_lo[:B].copy_(ctx_lo, non_blocking=True)
         g["graph"].replay()
+        if packed_reply:
+            return (g["packed"],)
         return (g["ids"], g["conf"], g["mg"]) if margin else (g["ids"], g["conf"])
 
     def insert_taps_graphed(self, slot_rows: torch.Tensor, pos_rows: torch.Tensor, taps: torch.Tensor) -> None:

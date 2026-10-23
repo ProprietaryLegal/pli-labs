@@ -281,3 +281,21 @@ def test_cli_rejects_max_model_len_outside_the_model_range(monkeypatch):
         with pytest.raises(SystemExit) as e:
             server.main()
         assert "max-model-len" in str(e.value)
+
+
+def test_cli_passes_max_model_len_to_the_tp2_worker(monkeypatch):
+    """--tp 2 --max-model-len N reaches the two-card build (lane E's port of the one-card flag)."""
+    import sys
+    from worker import server
+    seen = []
+
+    def fake_tp2(root, graphs, max_model_len):
+        seen.append(max_model_len)
+        raise SystemExit("built")
+    monkeypatch.setattr(server, "build_core_tp2", fake_tp2)
+    for argv, want in ((["--tp", "2", "--max-model-len", "1048576"], 1048576), (["--tp", "2"], 327680)):
+        monkeypatch.setattr(sys, "argv", ["server", "--ofl", "10.202.28.1:18620"] + argv)
+        with pytest.raises(SystemExit) as e:
+            server.main()
+        assert str(e.value) == "built"
+        assert seen[-1] == want

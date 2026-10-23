@@ -2,7 +2,7 @@
 
 **In short.** `tp2.py` runs the same drafter as the one-card worker (same checkpoint tensors, same contract, same
 server, same port) split over the NVLink pair `GPU-DRAFTER0` (rank 0) + `GPU-DRAFTER1` (rank 1), selected with
-`--tp 2` / `DSPARK_WORKER_TP=2`; one card stays the default and its code is untouched. Each card does half of the
+`--tp 2` / `DSPARK_WORKER_TP=2`; one card stays the default. Each card does half of the
 bandwidth-bound work (vocabulary head + Markov, routed and shared experts, wq_b / attention / wo_a / wo_b) and
 replicates the small rest; the halves meet in 6 all-reduces and one argmax exchange per drafted position per step,
 through lane E's own NVLink peer-to-peer kernels inside the CUDA graphs. **Measured on the pair** (2026-10-23
@@ -175,10 +175,11 @@ the same bits on either card.)
 ## Open items
 
 * Insert host overhead on the pair (above, ~0.1 ms per round).
-* Loading O2's one-card model (model.py) on rank 1's card in the same process BEFORE TP2 is built breaks TP2's
-  collectives (illegal address in the first all-reduce; a tiny or an 8 GB allocation on that card first does not):
-  process-global state shared by the two model implementations, not found yet. Only the parity tool loads both; it
-  builds TP2 first and works. The worker never loads model.py with --tp 2.
+* S10 P-3 mixed-model build/capture qualification: a process-wide implicit capture stream on the wrong device was
+  reproduced and fixed by passing model.py's owning stream explicitly. Fixed full/swapped/recreated pair lifecycles
+  pass. Native peer state also removes dependence on Torch's runtime expandable allocator. The original illegal-address
+  kernel remains unlocalized: corrected baseline/fixed cross-device allocator controls and a fresh full pair/emulation
+  comparison are still pending an authorized RX pair window. Do not mark P-3 closed from capture sensitivity alone.
 * Only the coordinator can measure the Spark-side effect (in-engine test).
 * --max-model-len (main's 88a31ed, ported in E18; the TP2 unit runs 1048576 like the production unit): the RoPE
   table is replicated, 269 MB per rank at 1,048,576 (84 MB at 327,680), so both cards hold ~0.18 GB more than the pair
@@ -217,3 +218,54 @@ unexplained. TP2 agrees with the engine exactly as often as the one-card worker 
 `tools/{tp2_tune,tp2_bench,tp2_parity}.py`, `tools/server_selftest.py` (tp argument), `tests/{test_p2p,test_tp2,
 test_fused_e}.py`, `run/{dsv41-dspark-worker-tp2.service,start_tp2.sh,stop_tp2.sh,status_tp2.sh,e_job.sh}`,
 `requirements.e.lock`. Results: `offload/results/e/`.
+
+## RX-TP2SAFE collective safety revision (2026-10-23)
+
+The worker's arithmetic and channel split are unchanged. Each push now publishes a per-block consumption acknowledgment
+only after all consumer reads and mirrored error stores finish. A successful block waits for that acknowledgment before
+completing. Together with double buffering and stream order this prevents reuse before consumption; it also makes a bad-id
+refusal on rank 1 visible to the rank-0 STEP check in the same round (S10 P-2). Both data publication and acknowledgment use
+system-scope release/acquire ordering. Timers compare only a local GPU timer against its own start time.
+
+Error bits (both headers): 1 local timeout, 2 peer timeout, 4 invalid received ID (mirrored), 8 cancellation, 16 epoch
+exhaustion. Epoch zero is never published: at uint32 exhaustion the operation fails closed, with no peer payload access.
+The old claim that exact-equality alone makes wrap safe was incomplete: an unused block's initialized zero flag could match
+wrapped epoch zero. A drained reset clears flags/acks and starts a fresh generation. Cancellation uses pre-created independent
+streams, so it can interrupt a collective parked on another stream. Outputs of failed/cancelled operations are refused by
+STEP and must never be interpreted as complete sums or proposals.
+
+`P2PPair.headers/reset` track every stream used by eager collective launches as well as current per-device streams. They wait
+for bounded idle completion before reading/clearing state; a timed-out idle wait or CUDA exception permanently poisons the
+pair. A poisoned pair refuses launches, graph replay and reset; `TP2Backend.healthy` reports false, causing the existing fatal
+worker exit/restart policy. This host latch never clears a CUDA sticky error. The native peer-enable path checks pending CUDA
+errors before handling the benign AlreadyEnabled status. Graphs retain the same state pointers throughout their lifetime;
+callers must keep the drafter alive until its graph replays and peer accesses drain.
+
+Debug oracle: `worker.p2p.reference.all_reduce` uses supported PyTorch device copies with explicit producer events, FP32
+addition and optional BF16 rounding. It is eager-only and does not use the push flags or raw peer pointers. `test_p2p.py`
+compares both implementations bit for bit, including delayed streams, varying block counts and mixed collective types.
+`python -m worker.p2p.lifecycle --full --cycles 2` isolates the S10 mixed-model build/capture order, checks eager/graph IDs
+and confidence equality, then destroys/recreates. `--swapped` reverses logical devices; `--legacy-capture` reinstates the
+implicit one-card capture stream for diagnosis. Run each failure reproduction in a fresh process.
+
+Lane-only runner: `worker/p2p/run_owned.sh solo|pair LOG COMMAND...` enforces UUIDs and both locks, caps execution at 14 minutes,
+records per-card telemetry, and terminates its own test process group if coordinator `PAIR_OK` stops naming RX-TP2SAFE. It
+never creates PAIR_OK or changes a service, power limit or clock. Production launchers remain the coordinator's responsibility.
+
+Peer state now uses an owning native `cudaMalloc` tensor with a guarded `cudaFree` deleter, allocated outside capture on
+its exact device. It is independent of Torch's caching/VMM allocator: exllamav3's Python import can enable expandable
+segments through a runtime setter without changing either allocator environment variable. `cudaDeviceEnablePeerAccess`
+does not establish access to arbitrary VMM allocations. The small native peer blocks therefore remain conventional CUDA
+allocations even when the model uses expandable segments. At max_words=163840 each state is 1,314,816 bytes (about
+1.254 MiB/card), outside Torch memory accounting. `test_runtime_expandable_allocator_cannot_change_peer_state_allocation`
+checks that native state pointers lie outside all Torch-managed segments and runs randomized exact collectives after the
+runtime allocator toggle. cudaMallocAsync remains explicitly unqualified/refused. A failed native free warns and requires
+process restart; it never clears a poisoned context.
+
+The model-free lifecycle's pair capacity matches `tests.test_p2p.MAXW` (163840 words), so every randomized payload fits;
+`test_pair_lifecycle_capacity_covers_sequence` pins that contract. `--allocator-import` imports the installed exllamav3
+Python package, allocates a probe and reports Torch segment types before constructing either peer state. Compare fresh
+baseline processes with and without `EXL3_EXPANDABLE_SEGMENTS=0`, then the native-allocation implementation. Single-card
+mode checks lifecycle/arithmetic only; cross-device raw-pointer mappings require the authorized pair. Use asynchronous
+launches for successful collective controls: `CUDA_LAUNCH_BLOCKING=1` serializes the controller's rank launches and can
+prevent the peer from joining a spin-wait collective.

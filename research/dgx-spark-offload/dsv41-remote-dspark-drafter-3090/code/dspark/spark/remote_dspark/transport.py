@@ -7,6 +7,10 @@ API (the sketch in the O3 brief, to be satisfied by lane O1's library as well):
     n = client.request(msg, resp_buf, timeout_s) # msg: one contiguous buffer
                                                  # (AppHeader + body); the reply frame is
                                                  # written into resp_buf[:n]
+    n = client.request_parts(parts, resp_buf, timeout_s)
+                                                 # the message is the concatenation of
+                                                 # parts (contiguous buffers, in order),
+                                                 # sent without being joined in Python
     client.close()
 
 Errors are explicit: TransportTimeout (deadline passed; the connection is then unusable
@@ -68,6 +72,12 @@ class RpcClient:
     def request(self, msg, resp_buf: bytearray, timeout_s: float) -> int:
         raise NotImplementedError
 
+    def request_parts(self, parts, resp_buf: bytearray, timeout_s: float) -> int:
+        """request() of the concatenation of parts. The round sends its STEP as [headers from a private buffer, rows
+        from the gather staging] so that it never writes into memory the engine stream may be refilling (S11 P-1);
+        TcpClient and O1Client override this without the join below."""
+        return self.request(bytearray().join(memoryview(p).cast("B") for p in parts), resp_buf, timeout_s)
+
     def close(self) -> None:
         raise NotImplementedError
 
@@ -111,14 +121,17 @@ class TcpClient(RpcClient):
                 self._sock = None
 
     def request(self, msg, resp_buf: bytearray, timeout_s: float) -> int:
+        return self.request_parts((msg,), resp_buf, timeout_s)
+
+    def request_parts(self, parts, resp_buf: bytearray, timeout_s: float) -> int:
         s = self._sock
         if s is None:
             raise TransportError("not connected")
         deadline = time.monotonic() + timeout_s
-        mv = memoryview(msg).cast("B")
+        views = [memoryview(p).cast("B") for p in parts]
         try:
             s.settimeout(_remaining(deadline))
-            self._send_all(s, mv, deadline)
+            self._send_all(s, views, deadline)
             n = self._recv_frame(s, resp_buf, deadline)
         except socket.timeout as e:
             self.close()
@@ -131,16 +144,20 @@ class TcpClient(RpcClient):
             raise TransportError(f"request to {self.host}:{self.port}: {e}") from e
         return n
 
-    def _send_all(self, s: socket.socket, mv: memoryview, deadline: float) -> None:
-        header = _LEN.pack(len(mv))
-        sent = s.sendmsg([header, mv])
-        total = 4 + len(mv)
-        while sent < total:
+    def _send_all(self, s: socket.socket, views: list[memoryview], deadline: float) -> None:
+        """The length prefix and the parts as one frame (one sendmsg per partial write, no join)."""
+        bufs = [memoryview(_LEN.pack(sum(len(v) for v in views)))] + [v for v in views if len(v)]
+        sent = s.sendmsg(bufs)
+        while True:
+            while bufs and sent >= len(bufs[0]):
+                sent -= len(bufs[0])
+                bufs.pop(0)
+            if not bufs:
+                return
+            if sent:
+                bufs[0] = bufs[0][sent:]
             s.settimeout(_remaining(deadline))
-            if sent < 4:
-                sent += s.sendmsg([header[sent:], mv])
-            else:
-                sent += s.send(mv[sent - 4:])
+            sent = s.sendmsg(bufs)
 
     def _recv_frame(self, s: socket.socket, resp_buf: bytearray, deadline: float) -> int:
         _recv_exact(s, memoryview(self._lenbuf), deadline)
