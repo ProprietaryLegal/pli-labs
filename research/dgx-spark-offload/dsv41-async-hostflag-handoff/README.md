@@ -143,6 +143,22 @@ After both drills:
 
 Switching the drafter from the two-card to the one-card worker took 12 s, with the serve decoding target-only in between.
 
+## Production (since 2026-10-23 13:56Z, one-card drafter worker)
+
+Production checks after the switch, which uses the process proxy with nap and lazy loading:
+- **Start:** serve ready in 363 s, the same as before (no EAGER).
+- **Short requests × 2:** TTFT 0.37 / 0.38 s with no first-request penalty; step p50 38.4 / 38.5 ms.
+- **First 32K request after the restart:** TTFT 16.24 s against about 14.5 s warm. That is a one-time lazy-loading cost
+  the short warm-up request does not cover. Step p50 was 40.5 ms.
+- **Greedy outputs:** 6 / 6 fixed prompts identical to the pre-switch reference.
+- **Rank-0 stats at 2,048 rounds:** 2,048 ok, 0 failed, 0 watchdog fires, 0 respawns (3 left), no warning counters.
+
+The warm-up request at start read its 5,041-token prompt in 4.2 s, but returned 1 completion token instead of the
+planned 32. The cause is not yet confirmed, and the warm-up may need a longer prompt to cover the 32K loading cost.
+
+The expected effect of this configuration, from window 4, is −0.9 to −3.9 % step p50 against synchronous production, at
+TTFT parity.
+
 ## When to use it, and when not
 
 Use it when an inference engine parks a CUDA stream on a host- or device-side flag that something else releases: remote
