@@ -23,6 +23,8 @@ Labs model repositories.
 - [ofl-rdma-transport](https://huggingface.co/ProprietaryLegal/ofl-rdma-transport)
 - [dsv41-longctx-bench-tools](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools)
 
+- [swift-1.5-27b-v100-serving](https://huggingface.co/ProprietaryLegal/swift-1.5-27b-v100-serving) (Swift 1.5 / Qwen3.8-27B on 4x V100: serving recipe and A/B)
+
 ## Model Card Sources
 
 - [Qwen3.5-104b-a10b-LegalReap/README.md](Qwen3.5-104b-a10b-LegalReap/README.md)
