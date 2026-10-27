@@ -56,6 +56,7 @@ Start here:
   - [Exact acceptance ceiling](https://github.com/ProprietaryLegal/dsv41-exact-acceptance-ceiling) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-exact-acceptance-ceiling).
   - [Full stack](https://github.com/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) · [HF](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload).
   - [Offload findings](https://github.com/ProprietaryLegal/dsv41-spark-offload-findings) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings).
+  - **2026-10-27:** [full source (all branches)](https://github.com/ProprietaryLegal/dsv41-offload) · [measurement harness](https://github.com/ProprietaryLegal/dsv41-window-harness) · [sampled drafting (PP4)](https://github.com/ProprietaryLegal/dsv41-sampled-drafting) · [status and lessons](research/dgx-spark-offload/2026-10-27-status-and-code.md).
 
 ## Repository Boundaries
 

@@ -1,5 +1,11 @@
 # DeepSeek-V4.1-Flash on 2× DGX Spark with x86 RTX 3090 offload
 
+<!-- pli:update:2026-10-27:start -->
+
+**Update 2026-10-27:** the full source is public at [ProprietaryLegal/dsv41-offload](https://github.com/ProprietaryLegal/dsv41-offload), with focused repos for the [measurement harness](https://github.com/ProprietaryLegal/dsv41-window-harness) and [sampled drafting](https://github.com/ProprietaryLegal/dsv41-sampled-drafting). Status and lessons: [2026-10-27-status-and-code.md](2026-10-27-status-and-code.md).
+
+<!-- pli:update:2026-10-27:end -->
+
 This page indexes the independently usable PLI Labs offload components for two DGX Spark / GB10 nodes and an x86 host. The standalone repositories are now canonical; the folders here are a snapshot for browsing earlier integrated material.
 
 <!-- pli:blurb:start -->
