@@ -1,5 +1,11 @@
 # DeepSeek-V4.1-Flash on 2× DGX Spark with x86 RTX 3090 offload
 
+<!-- pli:update:2026-10-28:start -->
+
+**Update 2026-10-28:** the DSV41 code was republished with test results for every published tree, a production build record and a full model card for the served weights: [2026-10-28-tests-build-model-card.md](2026-10-28-tests-build-model-card.md).
+
+<!-- pli:update:2026-10-28:end -->
+
 <!-- pli:update:2026-10-27:start -->
 
 **Update 2026-10-27:** the full source is public at [ProprietaryLegal/dsv41-offload](https://github.com/ProprietaryLegal/dsv41-offload), with focused repos for the [measurement harness](https://github.com/ProprietaryLegal/dsv41-window-harness) and [sampled drafting](https://github.com/ProprietaryLegal/dsv41-sampled-drafting). Status and lessons: [2026-10-27-status-and-code.md](2026-10-27-status-and-code.md).
