@@ -42,9 +42,9 @@ Start here:
 - [Swift 1.5 on 4x V100](https://github.com/ProprietaryLegal/swift-1.5-v100) - 1Cat-vLLM 1.5.1 serving recipe for
   Swift 1.5 (a Qwen3.8-27B fine-tune) on four V100-SXM2-32GB, and a blind A/B against Qwen3.8-27B: same quality on six
   legal-drafting tasks at about half the reasoning ([Hugging Face](https://huggingface.co/ProprietaryLegal/swift-1.5-27b-v100-serving)).
-- [DeepSeek-V4.1-Flash on 2× DGX Spark](research/dgx-spark-offload/README.md) - x86 Engram and RTX 3090
+- [DGX sPLIce: DeepSeek-V4.1-Flash on 2× DGX Spark + 2x RTX 3090 drafter, x86 offload](research/dgx-spark-offload/README.md) - x86 Engram and RTX 3090
   drafter offload, async handoff, long-context tools, and exact acceptance-ceiling analysis.
-  [Full-stack source](https://github.com/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) ·
+  [DGX sPLIce source](https://github.com/ProprietaryLegal/DGX-sPLIce-DeepSeek-V4.1-Flash-2xDGX-Spark-2xRTX3090-drafter-x86-offload) ·
   [Hugging Face collection](https://huggingface.co/collections/ProprietaryLegal/deepseek-v41-flash-on-2x-dgx-spark-x86-offload-6adab604a517b426ded3916e). Standalone repositories are canonical; hub folders are snapshots.
   - [Async host-flag handoff](https://github.com/ProprietaryLegal/dsv41-async-hostflag-handoff) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-async-hostflag-handoff).
   - [Remote RTX 3090 drafter](https://github.com/ProprietaryLegal/dsv41-remote-dspark-drafter-3090) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-remote-dspark-drafter-3090).
@@ -54,7 +54,7 @@ Start here:
   - [Native drafter on SM86](https://github.com/ProprietaryLegal/dsv41-native-1017-drafter-sm86) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86).
   - [Long-context benchmark tools](https://github.com/ProprietaryLegal/dsv41-longctx-bench-tools) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools).
   - [Exact acceptance ceiling](https://github.com/ProprietaryLegal/dsv41-exact-acceptance-ceiling) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-exact-acceptance-ceiling).
-  - [Full stack](https://github.com/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) · [HF](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload).
+  - [DGX sPLIce (full stack)](https://github.com/ProprietaryLegal/DGX-sPLIce-DeepSeek-V4.1-Flash-2xDGX-Spark-2xRTX3090-drafter-x86-offload) · [HF](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload).
   - [Offload findings](https://github.com/ProprietaryLegal/dsv41-spark-offload-findings) · [HF](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings).
   - **2026-10-27:** [full source (all branches)](https://github.com/ProprietaryLegal/dsv41-offload) · [measurement harness](https://github.com/ProprietaryLegal/dsv41-window-harness) · [sampled drafting (PP4)](https://github.com/ProprietaryLegal/dsv41-sampled-drafting) · [status and lessons](research/dgx-spark-offload/2026-10-27-status-and-code.md).
 

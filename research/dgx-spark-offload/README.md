@@ -1,5 +1,11 @@
 # DeepSeek-V4.1-Flash on 2× DGX Spark with x86 RTX 3090 offload
 
+<!-- pli:update:2026-11-01:start -->
+
+**Update 2026-11-01:** the full-stack repository is now **DGX sPLIce**: [ProprietaryLegal/DGX-sPLIce-DeepSeek-V4.1-Flash-2xDGX-Spark-2xRTX3090-drafter-x86-offload](https://github.com/ProprietaryLegal/DGX-sPLIce-DeepSeek-V4.1-Flash-2xDGX-Spark-2xRTX3090-drafter-x86-offload) (DeepSeek-V4.1-Flash on 2x DGX Spark + 2x RTX 3090 drafter, x86 offload). It carries the current production source, the measurements with raw JSON, and the install guide; the old address redirects.
+
+<!-- pli:update:2026-11-01:end -->
+
 <!-- pli:update:2026-10-28:start -->
 
 **Update 2026-10-28:** the DSV41 code was republished with test results for every published tree, a production build record and a full model card for the served weights: [2026-10-28-tests-build-model-card.md](2026-10-28-tests-build-model-card.md).
@@ -32,10 +38,10 @@ Status as of 2026-10-23: remote Engram, one-card remote drafting and the async p
 | Native drafter on SM86 | [source](https://github.com/ProprietaryLegal/dsv41-native-1017-drafter-sm86) | [entry](https://huggingface.co/ProprietaryLegal/dsv41-native-1017-drafter-sm86) | [dsv41-native-1017-drafter-sm86/](dsv41-native-1017-drafter-sm86/) | Merged opt-in only; fidelity gate fails; not serving |
 | Long-context benchmark tools | [source](https://github.com/ProprietaryLegal/dsv41-longctx-bench-tools) | [entry](https://huggingface.co/ProprietaryLegal/dsv41-longctx-bench-tools) | [dsv41-longctx-bench-tools/](dsv41-longctx-bench-tools/) | Measured tooling |
 | Exact acceptance ceiling | [source](https://github.com/ProprietaryLegal/dsv41-exact-acceptance-ceiling) | [entry](https://huggingface.co/ProprietaryLegal/dsv41-exact-acceptance-ceiling) | No hub snapshot; use standalone source | Research-only method and aggregates |
-| Full stack | [source](https://github.com/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) | [entry](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) | [overview](README.md) | Production overview; standalone code index |
+| DGX sPLIce (full stack) | [source](https://github.com/ProprietaryLegal/DGX-sPLIce-DeepSeek-V4.1-Flash-2xDGX-Spark-2xRTX3090-drafter-x86-offload) | [entry](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) | [overview](README.md) | Production overview; standalone code index |
 | Offload findings | [source](https://github.com/ProprietaryLegal/dsv41-spark-offload-findings) | [entry](https://huggingface.co/ProprietaryLegal/dsv41-spark-offload-findings) | [dsv41-spark-offload-findings/](dsv41-spark-offload-findings/) | Findings and qualification limits |
 
-Start with the [full-stack GitHub overview](https://github.com/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) or its [HF entry](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) for architecture, historical baseline comparisons, current configuration, reproduction and rollback. Each standalone component supplies its own code map, limitations, attribution and test instructions. The acceptance-ceiling repository contains the method and aggregate results; private captures and weights are excluded.
+Start with [DGX sPLIce on GitHub](https://github.com/ProprietaryLegal/DGX-sPLIce-DeepSeek-V4.1-Flash-2xDGX-Spark-2xRTX3090-drafter-x86-offload) or its [HF entry](https://huggingface.co/ProprietaryLegal/DeepSeek-V4.1-Flash-2xDGX-Spark-x86-offload) for architecture, historical baseline comparisons, current configuration, reproduction and rollback. Each standalone component supplies its own code map, limitations, attribution and test instructions. The acceptance-ceiling repository contains the method and aggregate results; private captures and weights are excluded.
 
 Work in progress: KV page packing validated on GB10 at 327,680 (production promotion pending); 524,288 serves correctly but is held for a prefill regression under investigation; 1M untested on GB10; prefix storage is cleared for gated tests but its host-RAM tier is not integrated; the prefill admission fix is CPU-tested and awaits independent review and GB10 validation; native arithmetic corrections have not cleared fidelity. Drafter self-distillation and further upstream adoption have no qualified serving gain. These are status notes, not performance results.
 
