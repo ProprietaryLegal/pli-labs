@@ -42,9 +42,9 @@ Start here:
 - [Swift 1.5 on 4x V100](https://github.com/ProprietaryLegal/swift-1.5-v100) - 1Cat-vLLM 1.5.1 serving recipe for
   Swift 1.5 (a Qwen3.8-27B fine-tune) on four V100-SXM2-32GB, and a blind A/B against Qwen3.8-27B: same quality on six
   legal-drafting tasks at about half the reasoning ([Hugging Face](https://huggingface.co/ProprietaryLegal/swift-1.5-27b-v100-serving)).
-- [Volta sPLIce: DeepSeek-V4.1-Flash on 8x V100](https://github.com/ProprietaryLegal/Volta-sPLIce-DeepSeek-V4.1-Flash-8xV100-SXM2-PP2xTP4-resident-Engram) - PP2 x TP4 on two NVLink quads
-  with Engram resident in host RAM: production config, every measurement and experiment with its verdict, our engine
-  patches and tools (75K-token first token 25.8 s).
+- [Volta sPLIt: DeepSeek-V4.1-Flash-1017 on 8x V100](https://github.com/ProprietaryLegal/Volta-sPLIt-DeepSeek-V4.1-Flash-1017-8xV100-SXM2-PP2xTP4) - **~118 tok/s decode, ~121 with thinking on**,
+  single stream, on eight 2018 V100s: PP2 x TP4 across two NVLink boards, every expert resident; the full patch series,
+  every measurement and lost lever, and the test queue (2026-11-03).
 - [DGX sPLIce: DeepSeek-V4.1-Flash on 2× DGX Spark + 2x RTX 3090 drafter, x86 offload](research/dgx-spark-offload/README.md) - x86 Engram and RTX 3090
   drafter offload, async handoff, long-context tools, and exact acceptance-ceiling analysis.
   [DGX sPLIce source](https://github.com/ProprietaryLegal/DGX-sPLIce-DeepSeek-V4.1-Flash-2xDGX-Spark-2xRTX3090-drafter-x86-offload) ·
